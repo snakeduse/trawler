@@ -1,0 +1,36 @@
+# Source of truth. scripts/hermes materializes this into .hermes/runtime/config.yaml.
+_config_version: 50
+
+model:
+  provider: deepseek
+  default: deepseek-v4-pro
+  api_mode: chat_completions
+fallback_providers: []
+
+terminal:
+  backend: local
+  cwd: ${TRAWLER_ROOT}
+
+platform_toolsets:
+  cli: [terminal, file, skills, delegation, todo, clarify]
+
+skills:
+  # Explicit external directory also supports Hermes versions without project discovery.
+  external_dirs:
+    - ${TRAWLER_ROOT}/.hermes/skills
+  project_discovery: false
+
+delegation:
+  provider: deepseek
+  model: deepseek-flash
+  fallback_providers: []
+  max_concurrent_children: 1
+  max_spawn_depth: 1
+  orchestrator_enabled: false
+  worktree_isolation: false
+
+agent:
+  max_turns: 60
+
+checkpoints:
+  enabled: true

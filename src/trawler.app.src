@@ -1,0 +1,9 @@
+{application, trawler,
+ [{description, "Embeddable IPv4 TCP scanner: project foundation"},
+  {vsn, "0.1.0-dev"},
+  {registered, [trawler_sup]},
+  {mod, {trawler_app, []}},
+  {applications, [kernel, stdlib]},
+  {env, []},
+  {modules, []},
+  {licenses, ["Apache-2.0"]}]}.

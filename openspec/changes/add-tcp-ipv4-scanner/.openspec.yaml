@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-13
+goal: Implement the first embeddable IPv4 TCP scanner and CLI using the shared
+  OTP core

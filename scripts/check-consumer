@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/env.sh" otp
+exec python3 "${TRAWLER_ROOT}/scripts/consumer_smoke.py"

@@ -1,0 +1,13 @@
+/_build/
+/doc/
+/rebar3.crashdump
+/erl_crash.dump
+/.cache/
+/.hermes/runtime/
+/.env
+/.env.*
+!/.env.example
+/node_modules/
+*.beam
+*.plt
+*.plt.hash

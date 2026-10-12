@@ -1,0 +1,40 @@
+schema: spec-driven
+
+context: |
+  Trawler is an embeddable Erlang/OTP 27 application with a separate escript CLI.
+  The library must work as a dependency of other Erlang applications, like Cowboy.
+  Runtime code is Erlang; Node/OpenSpec and Hermes are development tools only.
+  The initial scanner uses unprivileged TCP connect on IPv4: individual addresses,
+  lists, inclusive IP ranges, CIDR, individual ports and inclusive port ranges.
+  Provide synchronous and asynchronous APIs, status, cancellation and streamed results.
+  Bound connections globally and per scan; generate jobs lazily and release all resources.
+  A TCP timeout does not prove that a host is absent or a port is filtered.
+  IPv6, UDP, ICMP/ARP, OS detection, service fingerprinting and web UI are future work.
+  Keep OpenSpec artifacts in English, user-facing discussion and README in Russian.
+  Current main specs represent implemented behaviour; future scanner requirements
+  belong to the pending change until code, tests and review are complete.
+  The user explicitly authorized automatic planning-to-implementation for development
+  requests. Generate artifacts through CLI instructions in that cycle; the standalone
+  openspec-propose skill is planning-only and does not define the automatic cycle.
+
+rules:
+  proposal:
+    - State the intended capability, runtime impact and explicit exclusions.
+  design:
+    - Define public Erlang contracts and failure/resource lifecycle before delegation.
+    - Cover target validation, concurrency, deadlines and cancellation using loopback tests.
+  specs:
+    - Distinguish observed TCP outcomes from claims about host reachability.
+  tasks:
+    - Keep implementation tasks bounded and independently verifiable by the parent agent.
+    - Include EUnit, Common Test, Xref, Dialyzer and strict OpenSpec validation.
+
+operations:
+  apply:
+    guidance:
+      - Pro plans and validates artifacts, then automatically delegates implementation to Flash.
+      - Use one worker at a time and supply full task context and acceptance checks.
+      - Planning-only or scaffold-only requests leave future implementation tasks unchecked.
+  archive:
+    guidance:
+      - Archive only after all tasks and make check pass and Pro has reviewed the diff.
