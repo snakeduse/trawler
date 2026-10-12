@@ -1,37 +1,39 @@
-# IPv4 TCP Scanning
+# TCP-сканирование IPv4
 
 ## Why
 
-The foundation can start as an Erlang dependency and run a CLI, but cannot perform
-network scans. Consumers need a reusable TCP scanner that accepts host and port
-ranges without shelling out to nmap or requiring privileged sockets.
+Каркас запускается как зависимость Erlang-приложения и предоставляет CLI,
+но пока не сканирует сеть. Нужен повторно используемый TCP-сканер с диапазонами
+адресов и портов, без запуска nmap и без привилегированных сокетов.
 
 ## What Changes
 
-- Add input normalization for IPv4 addresses, lists, inclusive ranges and CIDR,
-  and for individual TCP ports, lists and inclusive ranges.
-- Add bounded, supervised TCP-connect probing with streamed observations,
-  synchronous collection, status and cancellation.
-- Add a public Erlang API and a `scan` CLI command with text and JSON output.
-- Extend lifecycle and loopback integration tests to cover resource cleanup.
+- Добавить нормализацию отдельных IPv4-адресов, списков, включительных диапазонов
+  и CIDR, а также номеров TCP-портов, списков и включительных диапазонов портов.
+- Добавить TCP connect под supervision с ограничением параллелизма, потоком
+  результатов, синхронным сбором, статусом и отменой.
+- Добавить публичный Erlang API и команду CLI `scan` с текстовым и JSON-выводом.
+- Расширить проверки жизненного цикла и интеграционные тесты на loopback,
+  проверяя освобождение ресурсов.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `target-selection`: Validate and normalize address/port selections without duplicate probes.
-- `tcp-scanning`: Execute bounded TCP probes and report observed outcomes.
-- `scan-api`: Expose asynchronous and synchronous Erlang contracts and scan lifecycle controls.
-- `scan-cli`: Translate command-line selections into the shared API and format results.
+- `target-selection`: проверка и нормализация адресов и портов без повторных проб.
+- `tcp-scanning`: ограниченные TCP-пробы и наблюдаемые результаты соединений.
+- `scan-api`: асинхронный и синхронный Erlang API и управление жизненным циклом.
+- `scan-cli`: передача параметров общего API из командной строки и форматирование результатов.
 
 ### Modified Capabilities
 
-- `project-foundation`: Replace the foundation's scan-argument rejection with the implemented scan command.
+- `project-foundation`: заменить отказ каркаса от аргументов сканирования рабочей командой.
 
 ## Impact
 
-New library modules and supervised scan processes extend the existing OTP tree.
-`trawler_cli` becomes an adapter to the public API. Runtime dependencies remain
-kernel and stdlib; OTP 27 provides TCP networking and JSON encoding.
-IPv6, UDP, ICMP/ARP, OS detection, service fingerprinting, web UI and exact nmap
-argument compatibility are excluded. This prepared change has not been applied.
+Новые библиотечные модули и процессы сканирования расширят существующее дерево OTP.
+`trawler_cli` станет адаптером публичного API. Зависимостями во время выполнения
+останутся kernel и stdlib; OTP 27 предоставляет TCP и кодирование JSON.
+IPv6, UDP, ICMP/ARP, определение ОС, распознавание сервисов, веб-интерфейс
+и точное повторение аргументов nmap исключены. Это изменение подготовлено,
+но ещё не применено.

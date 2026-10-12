@@ -1,39 +1,41 @@
-# Scan CLI
+# CLI сканирования
 
 ## Purpose
 
-Allow command-line users to select hosts and ports and consume text or JSON
-results through the same scanning core used by embedded Erlang applications.
+Позволить пользователю командной строки выбирать адреса и порты и получать
+текстовые или JSON-результаты из ядра, общего со встраиваемыми Erlang-приложениями.
 
 ## ADDED Requirements
 
-### Requirement: Shared-core scan command
-The CLI SHALL provide `trawler scan` with required `--targets` and `--ports`
-arguments, optional timeout/concurrency controls and `--json` output selection.
-It SHALL use the public Erlang API and the same validation and outcome semantics.
+### Requirement: Команда сканирования общего ядра
+CLI должен (SHALL) предоставлять `trawler scan` с обязательными `--targets`
+и `--ports`, необязательными таймаутом и параллелизмом и выбором JSON через `--json`.
+Он должен (SHALL) использовать публичный Erlang API и ту же проверку и семантику исходов.
 
-#### Scenario: A CLI scan matches library behaviour
-- **WHEN** equivalent target, port and option selections are passed to CLI and library
-- **THEN** both expose equivalent connection observations
+#### Scenario: CLI соответствует библиотеке
+- **WHEN** CLI и библиотеке переданы эквивалентные адреса, порты и настройки
+- **THEN** оба возвращают эквивалентные наблюдения соединений
 
-### Requirement: Result formatting
-Text output SHALL show IP, port and state plus summary counters. JSON output SHALL
-be a single valid object containing `results` and `summary`, with dotted-decimal
-IP strings and string states. Diagnostics SHALL be written to stderr.
+### Requirement: Формат результатов
+Текст должен (SHALL) показывать IP, порт, состояние и итоговые счётчики.
+JSON должен (SHALL) быть одним корректным объектом с `results` и `summary`,
+строковыми IP с точками и строковыми состояниями.
+Диагностика должна (SHALL) направляться в stderr.
 
-#### Scenario: JSON output is requested
-- **WHEN** the user runs a completed scan with `--json`
-- **THEN** stdout parses as a single JSON object with all observed results and summary
-- **AND** stdout contains no progress or diagnostic text
+#### Scenario: Запрошен JSON
+- **WHEN** пользователь запускает завершившееся сканирование с `--json`
+- **THEN** stdout разбирается как один JSON-объект со всеми наблюдениями и сводкой
+- **AND** stdout не содержит прогресс или диагностику
 
-### Requirement: Completion and error exit statuses
-The CLI SHALL exit 0 for completed scans regardless of whether an open port was
-found, 2 for invalid arguments and 1 for operational failures.
+### Requirement: Коды завершения и ошибок
+CLI должен (SHALL) завершаться с кодом 0 для законченных сканирований
+независимо от наличия открытых портов, 2 для неверных аргументов
+и 1 для ошибок выполнения.
 
-#### Scenario: No ports are open
-- **WHEN** a scan completes with closed ports only
-- **THEN** its exit status is 0
+#### Scenario: Открытых портов нет
+- **WHEN** сканирование завершилось только с закрытыми портами
+- **THEN** код выхода равен 0
 
-#### Scenario: Arguments are invalid
-- **WHEN** required arguments are missing or selections are invalid
-- **THEN** the CLI exits 2 with a diagnostic and does not start a scan
+#### Scenario: Неверные аргументы
+- **WHEN** отсутствуют обязательные аргументы или выборки неверны
+- **THEN** CLI завершается с кодом 2 и диагностикой, не запуская сканирование

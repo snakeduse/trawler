@@ -1,52 +1,52 @@
-# Scan API
+# API сканирования
 
 ## Purpose
 
-Expose the same reusable scanning capability to Erlang consumers through
-asynchronous events, synchronous collection, progress inspection and cancellation.
+Предоставить Erlang-потребителям единое ядро сканирования через асинхронные
+события, синхронный сбор, просмотр прогресса и отмену.
 
 ## ADDED Requirements
 
-### Requirement: Asynchronous scan lifecycle
-The public API SHALL provide `start_scan/3`, returning a scan reference or a tagged
-error, and SHALL stream result events to the selected local recipient process.
-Each scan SHALL produce exactly one terminal event after resource cleanup and
-SHALL emit no later results.
+### Requirement: Жизненный цикл асинхронного сканирования
+Публичный API должен (SHALL) предоставлять `start_scan/3`, возвращать ссылку
+сканирования или ошибку с меткой и посылать результаты выбранному локальному процессу.
+Каждое сканирование должно (SHALL) отправлять ровно одно завершающее событие
+после освобождения ресурсов и не должно (SHALL) отправлять результаты после него.
 
-#### Scenario: An asynchronous scan completes
-- **WHEN** a valid scan starts and all probes finish
-- **THEN** the recipient receives result events and one done event with counters
-- **AND** asynchronous storage retains counters rather than a complete result list
+#### Scenario: Асинхронное сканирование завершилось
+- **WHEN** корректное сканирование запущено и все пробы завершены
+- **THEN** получатель получает результаты и одно событие done со счётчиками
+- **AND** асинхронное хранилище сохраняет счётчики, а не полный список результатов
 
-#### Scenario: The application is not started
-- **WHEN** a caller invokes the scanning API while trawler is stopped
-- **THEN** it receives `{error, not_started}`
+#### Scenario: Приложение не запущено
+- **WHEN** вызывается API сканирования при остановленном trawler
+- **THEN** возвращается `{error, not_started}`
 
-### Requirement: Synchronous scan collection
-The API SHALL provide `scan/3`, collecting the same observations and returning
-results sorted by numeric IPv4 address and port. It SHALL leave unrelated caller
-messages untouched and SHALL return an error rather than successful partial data
-when its deadline expires.
+### Requirement: Синхронный сбор результатов
+API должен (SHALL) предоставлять `scan/3`, собирать те же наблюдения
+и возвращать их в порядке числового IPv4-адреса и порта.
+Он должен (SHALL) сохранять посторонние сообщения вызывающего процесса
+и возвращать ошибку вместо успешных частичных данных при истечении срока.
 
-#### Scenario: Both APIs observe the same listener
-- **WHEN** equivalent requests use synchronous and asynchronous APIs
-- **THEN** they report equivalent address/port outcomes
-- **AND** unrelated messages remain available in the synchronous caller's mailbox
+#### Scenario: Оба API наблюдают один сервер
+- **WHEN** эквивалентные запросы выполняются через синхронный и асинхронный API
+- **THEN** исходы для пар «адрес / порт» эквивалентны
+- **AND** посторонние сообщения остаются доступны вызывающему синхронного API
 
-### Requirement: Status and cancellation
-The API SHALL provide `status/1` and `cancel/1`, expose state and counters, allow
-idempotent cancellation of active/cancelled scans, and return documented errors
-for unknown references or already completed scans. Terminal status SHALL remain
-available for 60 seconds before expiry.
+### Requirement: Статус и отмена
+API должен (SHALL) предоставлять `status/1` и `cancel/1`, состояние и счётчики,
+идемпотентную отмену активных и отменённых сканирований и описанные ошибки
+для неизвестных ссылок или уже завершённых сканирований.
+Завершённый статус должен (SHALL) быть доступен 60 секунд до истечения хранения.
 
-#### Scenario: Progress is inspected
-- **WHEN** a caller requests status during execution
-- **THEN** state and total/completed counters reflect the scan's progress
+#### Scenario: Просмотр прогресса
+- **WHEN** вызывающий запрашивает статус во время работы
+- **THEN** состояние и общее и завершённое число проб отражают прогресс
 
-#### Scenario: An unknown reference is used
-- **WHEN** status or cancellation receives an unknown or expired scan reference
-- **THEN** it returns `{error, not_found}`
+#### Scenario: Неизвестная ссылка
+- **WHEN** статус или отмена получает неизвестную либо устаревшую ссылку
+- **THEN** возвращается `{error, not_found}`
 
-#### Scenario: Scan ownership ends
-- **WHEN** the caller or recipient exits during execution
-- **THEN** the scan stops and releases its resources
+#### Scenario: Владение сканированием прекратилось
+- **WHEN** вызывающий процесс или получатель выходит во время работы
+- **THEN** сканирование прекращается и освобождает ресурсы

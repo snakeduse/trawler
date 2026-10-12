@@ -1,4 +1,4 @@
-# Source of truth. scripts/hermes materializes this into .hermes/runtime/config.yaml.
+# Основная конфигурация. scripts/hermes создаёт рабочую копию в .hermes/runtime/config.yaml.
 _config_version: 50
 
 model:
@@ -15,7 +15,7 @@ platform_toolsets:
   cli: [terminal, file, skills, delegation, todo, clarify]
 
 skills:
-  # Explicit external directory also supports Hermes versions without project discovery.
+  # Явный каталог навыков поддерживается и в версиях Hermes без поиска навыков проекта.
   external_dirs:
     - ${TRAWLER_ROOT}/.hermes/skills
   project_discovery: false

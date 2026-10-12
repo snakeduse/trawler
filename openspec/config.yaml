@@ -1,40 +1,46 @@
 schema: spec-driven
 
 context: |
-  Trawler is an embeddable Erlang/OTP 27 application with a separate escript CLI.
-  The library must work as a dependency of other Erlang applications, like Cowboy.
-  Runtime code is Erlang; Node/OpenSpec and Hermes are development tools only.
-  The initial scanner uses unprivileged TCP connect on IPv4: individual addresses,
-  lists, inclusive IP ranges, CIDR, individual ports and inclusive port ranges.
-  Provide synchronous and asynchronous APIs, status, cancellation and streamed results.
-  Bound connections globally and per scan; generate jobs lazily and release all resources.
-  A TCP timeout does not prove that a host is absent or a port is filtered.
-  IPv6, UDP, ICMP/ARP, OS detection, service fingerprinting and web UI are future work.
-  Keep OpenSpec artifacts in English, user-facing discussion and README in Russian.
-  Current main specs represent implemented behaviour; future scanner requirements
-  belong to the pending change until code, tests and review are complete.
-  The user explicitly authorized automatic planning-to-implementation for development
-  requests. Generate artifacts through CLI instructions in that cycle; the standalone
-  openspec-propose skill is planning-only and does not define the automatic cycle.
+  Trawler — встраиваемое приложение Erlang/OTP 27 с отдельным CLI в формате escript.
+  Библиотека подключается как зависимость других Erlang-приложений, подобно Cowboy.
+  Код приложения пишется на Erlang; Node/OpenSpec и Hermes нужны для разработки.
+  Первая версия сканера использует TCP connect без повышенных привилегий и IPv4:
+  отдельные адреса, списки, включительные диапазоны IP, CIDR, номера и диапазоны портов.
+  Нужны синхронный и асинхронный API, статус, отмена и поток результатов.
+  Ограничивать соединения глобально и для каждого сканирования; создавать задания
+  по мере необходимости и освобождать все ресурсы.
+  TCP-таймаут не доказывает отсутствие хоста или фильтрацию порта.
+  IPv6, UDP, ICMP/ARP, определение ОС, распознавание сервисов и веб-интерфейс — будущие задачи.
+  Документы OpenSpec, AGENTS.md, инструкции проекта, обсуждения и README писать по-русски.
+  Стандартные навыки .hermes/skills/*/SKILL.md оставлять в исходном английском виде.
+  Сохранять имена API, команды, ключи конфигурации и машинные маркеры OpenSpec:
+  Purpose, Requirements, Requirement:, Scenario:, ADDED/MODIFIED/REMOVED/RENAMED
+  Requirements, WHEN, THEN, AND, SHALL и MUST. SHALL/MUST означают «должно».
+  Согласованно переводить названия требований и сценариев в основной и delta-спецификациях.
+  Текущие основные спецификации описывают реализованное поведение. Требования
+  будущего сканера остаются в подготовленном изменении до завершения кода, тестов и проверки.
+  Пользователь явно разрешил автоматический переход от планирования к реализации
+  в запросах на разработку. В этом цикле создавать документы через инструкции CLI;
+  отдельный навык openspec-propose предназначен только для планирования.
 
 rules:
   proposal:
-    - State the intended capability, runtime impact and explicit exclusions.
+    - Указывать нужную возможность, влияние на приложение и явные исключения.
   design:
-    - Define public Erlang contracts and failure/resource lifecycle before delegation.
-    - Cover target validation, concurrency, deadlines and cancellation using loopback tests.
+    - До делегирования определить публичные контракты Erlang и жизненный цикл ресурсов при ошибках.
+    - Описывать проверки адресов, параллелизм, предельные сроки и отмену с тестами на loopback.
   specs:
-    - Distinguish observed TCP outcomes from claims about host reachability.
+    - Отделять наблюдаемые результаты TCP от выводов о доступности хоста.
   tasks:
-    - Keep implementation tasks bounded and independently verifiable by the parent agent.
-    - Include EUnit, Common Test, Xref, Dialyzer and strict OpenSpec validation.
+    - Делать задачи реализации ограниченными и независимо проверяемыми основным агентом.
+    - Включать EUnit, Common Test, Xref, Dialyzer и строгую валидацию OpenSpec.
 
 operations:
   apply:
     guidance:
-      - Pro plans and validates artifacts, then automatically delegates implementation to Flash.
-      - Use one worker at a time and supply full task context and acceptance checks.
-      - Planning-only or scaffold-only requests leave future implementation tasks unchecked.
+      - Pro планирует и проверяет документы, затем автоматически поручает реализацию Flash.
+      - Использовать одного исполнителя одновременно и передавать полный контекст и критерии приёмки.
+      - Запросы только на планирование или каркас оставляют будущие задачи реализации без отметок.
   archive:
     guidance:
-      - Archive only after all tasks and make check pass and Pro has reviewed the diff.
+      - Архивировать только после завершения всех задач, успешного make check и проверки diff агентом Pro.

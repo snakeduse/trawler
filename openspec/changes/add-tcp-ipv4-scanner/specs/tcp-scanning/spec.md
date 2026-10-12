@@ -1,46 +1,47 @@
-# TCP Scanning
+# TCP-сканирование
 
 ## Purpose
 
-Observe IPv4 TCP connection outcomes with bounded resource use and report the
-limits of those observations without claiming unsupported host classifications.
+Наблюдать исходы TCP-соединений IPv4 с ограниченным использованием ресурсов
+и описывать пределы наблюдений без необоснованной классификации хостов.
 
 ## ADDED Requirements
 
-### Requirement: Observed connection outcomes
-The scanner SHALL report `open` for a successful connect, `closed` for connection
-refusal, `timeout` for an expired connect, `unreachable` for network/host unreachable,
-and `error` with a reason for other socket failures. Each result SHALL identify its
-address and port and contain a nonnegative elapsed duration.
+### Requirement: Наблюдаемые исходы соединений
+Сканер должен (SHALL) возвращать `open` при успешном соединении, `closed` при отказе,
+`timeout` при истечении таймаута, `unreachable` при недоступности сети или хоста
+и `error` с причиной для прочих ошибок сокета.
+Каждый результат должен (SHALL) содержать адрес, порт и неотрицательную длительность.
 
-#### Scenario: An open loopback port
-- **WHEN** a TCP listener accepts connections on the selected loopback port
-- **THEN** the result is `open` and the scanner closes its connection
+#### Scenario: Открытый порт на loopback
+- **WHEN** TCP-сервер принимает соединения на выбранном локальном порту
+- **THEN** результат равен `open` и сканер закрывает соединение
 
-#### Scenario: A refused connection
-- **WHEN** the TCP connection is refused
-- **THEN** the result is `closed`
+#### Scenario: Отказ в соединении
+- **WHEN** TCP-соединение отклонено
+- **THEN** результат равен `closed`
 
-#### Scenario: No response before timeout
-- **WHEN** the finite connection timeout expires
-- **THEN** the result is `timeout`
-- **AND** the result does not assert that the host is absent or the port is filtered
+#### Scenario: Нет ответа до таймаута
+- **WHEN** истекает конечный таймаут соединения
+- **THEN** результат равен `timeout`
+- **AND** результат не утверждает отсутствие хоста или фильтрацию порта
 
-### Requirement: Bounded work across scans
-Active connections SHALL obey both the per-scan and application-wide limits.
-Scheduling SHALL not materialize the full host/port Cartesian product and SHALL
-allow competing scans to make progress while capacity is available.
+### Requirement: Ограничение нагрузки между сканированиями
+Активные соединения должны (SHALL) соблюдать индивидуальный и глобальный лимиты.
+Планирование не должно (SHALL) создавать полное декартово произведение адресов
+и портов в памяти и должно (SHALL) позволять другим сканированиям продвигаться,
+пока есть свободная ёмкость.
 
-#### Scenario: Concurrent scans
-- **WHEN** multiple scans have pending probes
-- **THEN** active connections never exceed the global limit or any per-scan limit
-- **AND** each pending scan can receive available capacity
+#### Scenario: Одновременные сканирования
+- **WHEN** у нескольких сканирований есть ожидающие пробы
+- **THEN** число соединений не превышает глобальный и индивидуальные лимиты
+- **AND** каждое ожидающее сканирование может получить свободную ёмкость
 
-### Requirement: Cleanup on every terminal path
-Connections and reserved capacity SHALL be released after success, failure,
-cancellation, deadline expiry or scan owner/recipient death.
+### Requirement: Освобождение ресурсов при любом завершении
+Соединения и зарезервированная ёмкость должны (SHALL) освобождаться после успеха,
+ошибки, отмены, истечения срока или выхода владельца либо получателя.
 
-#### Scenario: Cancellation during active probing
-- **WHEN** an active scan is cancelled
-- **THEN** its remaining work stops and in-flight sockets are closed
-- **AND** other scans can use its released capacity
+#### Scenario: Отмена активных проб
+- **WHEN** активное сканирование отменяется
+- **THEN** оставшаяся работа прекращается и активные сокеты закрываются
+- **AND** другие сканирования могут использовать освободившуюся ёмкость

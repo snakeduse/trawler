@@ -1,61 +1,62 @@
-# Project Foundation
+# Основа проекта
 
 ## Purpose
 
-Provide a buildable OTP 27 application and CLI foundation with reproducible tools,
-isolated Hermes configuration and a validated specification-driven development workflow.
+Предоставить собираемый каркас OTP 27 и CLI, воспроизводимые инструменты,
+изолированную конфигурацию Hermes и проверяемую разработку по спецификациям.
 
 ## Requirements
 
-### Requirement: Embeddable application lifecycle
-Trawler SHALL start and stop as a standard OTP application using kernel and stdlib,
-and SHALL expose a supervised application root without requiring development tools.
+### Requirement: Жизненный цикл встраиваемого приложения
+Trawler должен (SHALL) запускаться и останавливаться как стандартное OTP-приложение
+с kernel и stdlib и предоставлять корневой supervisor без инструментов разработки.
 
-#### Scenario: An Erlang consumer starts the dependency
-- **WHEN** a consumer calls `application:ensure_all_started(trawler)`
-- **THEN** the application starts and `trawler_sup` is registered
-- **AND** stopping trawler terminates its supervision tree
+#### Scenario: Erlang-приложение-потребитель запускает зависимость
+- **WHEN** потребитель вызывает `application:ensure_all_started(trawler)`
+- **THEN** приложение запускается и `trawler_sup` регистрируется
+- **AND** остановка trawler завершает его дерево supervision
 
-### Requirement: Foundation CLI
-The escript SHALL provide help and its application version, and SHALL return a
-nonzero exit code for unsupported arguments without claiming a scan took place.
+### Requirement: CLI каркаса
+Escript должен (SHALL) показывать справку и версию приложения и возвращать
+ненулевой код для неподдерживаемых аргументов, не утверждая, что сканирование выполнено.
 
-#### Scenario: Help is requested
-- **WHEN** the user runs `trawler --help`
-- **THEN** usage is printed and the process exits with code 0
+#### Scenario: Запрос справки
+- **WHEN** пользователь запускает `trawler --help`
+- **THEN** выводится справка и процесс завершается с кодом 0
 
-#### Scenario: Version is requested
-- **WHEN** the user runs `trawler --version`
-- **THEN** the application version is printed and the process exits with code 0
+#### Scenario: Запрос версии
+- **WHEN** пользователь запускает `trawler --version`
+- **THEN** выводится версия приложения и процесс завершается с кодом 0
 
-#### Scenario: Unsupported arguments are supplied
-- **WHEN** an unknown command or unsupported option is passed to the foundation CLI
-- **THEN** the process exits with code 2 and prints a diagnostic to stderr
+#### Scenario: Неподдерживаемые аргументы
+- **WHEN** каркасу CLI передана неизвестная команда или неподдерживаемая опция
+- **THEN** процесс завершается с кодом 2 и выводит диагностику в stderr
 
-### Requirement: Reproducible development workflow
-Project wrappers SHALL use OTP 27 and globally installed OpenSpec 1.14.1 under
-Node 24.15.0. The required check command SHALL compile, run EUnit and Common Test,
-run Xref and Dialyzer, and strictly validate current specs and pending changes.
+### Requirement: Воспроизводимая разработка
+Обёртки проекта должны (SHALL) использовать OTP 27 и глобальный OpenSpec 1.14.1
+в Node 24.15.0. Обязательная команда проверок должна (SHALL) компилировать,
+запускать EUnit и Common Test, Xref и Dialyzer и строго валидировать текущие
+спецификации и подготовленные изменения.
 
-#### Scenario: Required checks run
-- **WHEN** a developer runs `make check` with the pinned tools installed
-- **THEN** each required verification runs and a failure yields a nonzero exit code
+#### Scenario: Запуск обязательных проверок
+- **WHEN** разработчик запускает `make check` с установленными закреплёнными инструментами
+- **THEN** выполняется каждая обязательная проверка и любая ошибка даёт ненулевой код выхода
 
-### Requirement: Project-isolated model orchestration
-The project Hermes launcher SHALL select Pro as the main model and Flash as the
-implementation model, isolate state under the ignored runtime directory, and load
-project OpenSpec skills without modifying the default Hermes profile.
+### Requirement: Изолированное взаимодействие моделей
+Обёртка Hermes должна (SHALL) выбирать Pro основной моделью, Flash исполнителем,
+хранить состояние в игнорируемом runtime-каталоге и загружать навыки OpenSpec
+проекта без изменения стандартного профиля Hermes.
 
-#### Scenario: A development request enters the automatic workflow
-- **WHEN** the user requests a behaviour change
-- **THEN** Pro prepares and validates the OpenSpec artifacts before delegating to Flash
-- **AND** a separate Flash command is not required
+#### Scenario: Запрос разработки запускает автоматический цикл
+- **WHEN** пользователь запрашивает изменение поведения
+- **THEN** Pro готовит и валидирует документы OpenSpec до делегирования Flash
+- **AND** отдельная команда для Flash не требуется
 
-#### Scenario: Only project preparation is requested
-- **WHEN** the user requests only a scaffold or specifications
-- **THEN** future implementation tasks remain unchecked and are not applied automatically
+#### Scenario: Запрошена только подготовка проекта
+- **WHEN** пользователь запрашивает только каркас или спецификации
+- **THEN** будущие задачи реализации остаются без отметок и не применяются автоматически
 
-#### Scenario: Existing credentials are reused
-- **WHEN** a DeepSeek key is available in the process environment, runtime env file or user Hermes env file
-- **THEN** only that credential is provided to the launched project process
-- **AND** its value is neither printed nor added to tracked configuration
+#### Scenario: Повторное использование существующего ключа
+- **WHEN** ключ DeepSeek доступен в окружении процесса, runtime-файле env или пользовательском env Hermes
+- **THEN** из этих файлов запускаемому процессу передаётся только этот ключ
+- **AND** значение не печатается и не добавляется в отслеживаемую конфигурацию

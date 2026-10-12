@@ -1,42 +1,49 @@
-# IPv4 TCP Scanner Design
+# Проектирование TCP-сканера IPv4
 
-## Context
+## Контекст
 
-The repository currently has an OTP application root and an escript shell. The
-scanner will be a reusable dependency with the same core serving Erlang consumers
-and CLI users. All network tests use loopback and temporary listener sockets.
+Сейчас репозиторий содержит корневое OTP-приложение и каркас escript.
+Сканер станет повторно используемой зависимостью: одно ядро обслуживает
+Erlang-приложения и CLI. Все сетевые тесты используют loopback и временные
+слушающие сокеты.
 
-## Goals / Non-Goals
+## Цели и исключения
 
-Support TCP connect over IPv4, normalized selections, bounded work, cancellation,
-status and two result consumption modes. Keep runtime dependencies within OTP 27.
-No privileged probes, ping prerequisites, UDP, IPv6, hostname resolution, service
-fingerprinting, OS detection, persistent scan storage or browser interface in v1.
+Поддержать TCP connect через IPv4, нормализованные адреса и порты, ограничение
+нагрузки, отмену, статус и два способа получения результатов.
+Зависимости во время выполнения ограничить OTP 27.
+В первой версии исключены привилегированные пробы, обязательный ping,
+UDP, IPv6, разрешение имён хостов, распознавание сервисов, определение ОС,
+постоянное хранение сканирований и браузерный интерфейс.
 
-## Decisions
+## Принятые решения
 
-### Input contract
+### Форматы входных данных
 
-`Targets` accepts a UTF-8 binary expression or a nonempty list of IPv4 tuples and
-binary expressions. A binary is a comma-separated selection of dotted-decimal
-addresses, full-address inclusive ranges (`192.0.2.1-192.0.2.10`) or CIDR
-(`192.0.2.0/24`). Whitespace around tokens is ignored; empty tokens are rejected.
-IPv4 octets are decimal integers in 0..255. CIDR normalizes host bits to the subnet;
-all addresses in the subnet are included, including its first and last addresses.
+`Targets` принимает бинарную строку UTF-8 или непустой список IPv4-кортежей
+и бинарных строк. Строка содержит элементы через запятую: IPv4 в десятичной
+записи с точками, включительные диапазоны полных адресов
+(`192.0.2.1-192.0.2.10`) или CIDR (`192.0.2.0/24`).
+Пробелы вокруг элементов игнорируются; пустые элементы отклоняются.
+Октеты IPv4 — десятичные целые числа 0..255. CIDR нормализует биты хоста
+до адреса подсети; включаются все адреса подсети, в том числе первый и последний.
 
-`Ports` accepts a UTF-8 binary expression or a nonempty list of integers and
-`{range, First, Last}` tuples. Binary expressions contain comma-separated integers
-or inclusive ranges. Ports are 1..65535; zero, descending ranges, malformed input,
-non-IPv4 addresses and invalid CIDR prefixes are errors. Selections are deduplicated.
-The application limit `max_hosts` defaults to 65536 unique hosts; larger selections
-return `too_many_hosts` before any network work. Determine cardinality using
-normalized intervals before expanding addresses. Port selections are bounded by
-the port space. Never materialize the host × port Cartesian product.
+`Ports` принимает бинарную строку UTF-8 или непустой список целых чисел
+и кортежей `{range, First, Last}`. В строке перечисляются через запятую
+числа или включительные диапазоны. Порты находятся в пределах 1..65535.
+Нулевой порт, обратные диапазоны, ошибочный формат, адреса не IPv4 и неверные
+префиксы CIDR отклоняются. Повторы устраняются.
+Лимит приложения `max_hosts` по умолчанию равен 65536 уникальным хостам.
+Большая выборка возвращает `too_many_hosts` до любых сетевых операций.
+Считай число адресов по нормализованным интервалам до их разворачивания.
+Количество портов ограничено пространством номеров портов.
+Не создавай в памяти полное декартово произведение «хосты × порты».
 
-### Public Erlang API
+### Публичный Erlang API
 
-All functions require the OTP application to be running; otherwise return
-`{error, not_started}`. Scan references are opaque Erlang references local to the VM.
+Для всех функций OTP-приложение должно быть запущено; иначе возвращается
+`{error, not_started}`. Ссылки сканирования — непрозрачные Erlang references,
+действующие только в текущей виртуальной машине.
 
 ```erlang
 trawler:start_scan(Targets, Ports, Options) -> {ok, ScanRef} | {error, Reason}.
@@ -45,14 +52,16 @@ trawler:status(ScanRef) -> {ok, Status} | {error, not_found}.
 trawler:cancel(ScanRef) -> ok | {error, not_found | already_finished}.
 ```
 
-`Options` is a map: `timeout_ms` (positive integer, default 1000), `concurrency`
-(positive integer, default 64, at most the application's global limit),
-`deadline_ms` (positive integer or `infinity`, default `infinity`), and `recipient`
-(local pid, default caller, asynchronous API only). Reject unknown or invalid
-options with `{error, {invalid_options, Details}}`; return analogous tagged input
-errors for invalid targets/ports. Validate the complete request before probing.
+`Options` — map: `timeout_ms` (положительное целое, по умолчанию 1000),
+`concurrency` (положительное целое, по умолчанию 64, не выше глобального лимита),
+`deadline_ms` (положительное целое или `infinity`, по умолчанию `infinity`)
+и `recipient` (локальный pid, по умолчанию вызывающий процесс,
+только для асинхронного API).
+Неизвестные или неверные опции возвращают `{error, {invalid_options, Details}}`;
+для неверных адресов и портов возвращаются аналогичные ошибки с соответствующей
+меткой. Полностью проверяй запрос до начала проб.
 
-The async API sends these messages to the recipient:
+Асинхронный API посылает получателю следующие сообщения:
 
 ```erlang
 {trawler, ScanRef, {result, Result}}
@@ -61,73 +70,89 @@ The async API sends these messages to the recipient:
 {trawler, ScanRef, {error, Reason, Summary}}
 ```
 
-`Result` is a map with `ip` (IPv4 tuple), `port`, `state`
-(`open | closed | timeout | unreachable | error`), and `elapsed_ms`. Include
-`reason` for unreachable/error outcomes. Async results follow completion order.
-Exactly one terminal event is emitted, after all in-flight workers release their
-resources, with no later result events. `Summary` contains total/completed counts,
-counts by outcome and elapsed milliseconds; unattempted probes are not outcomes.
+`Result` — map с полями `ip` (IPv4-кортеж), `port`, `state`
+(`open | closed | timeout | unreachable | error`) и `elapsed_ms`.
+Для недоступности и ошибки добавляй `reason`.
+Асинхронные результаты приходят в порядке завершения проб.
+Ровно одно завершающее событие отправляется после освобождения ресурсов
+всех активных исполнителей; после него результатов больше нет.
+`Summary` содержит общее и завершённое число проб, счётчики по исходам
+и длительность в миллисекундах. Невыполненная проба не считается исходом.
 
-`Status` contains `state` (`queued | running | completed | cancelled | failed`),
-total/completed counts and counts by outcome. Retain terminal status for 60 seconds,
-then return `not_found`. Async mode retains counters, not a full result list.
+`Status` содержит `state` (`queued | running | completed | cancelled | failed`),
+общее и завершённое число проб и счётчики по исходам.
+Завершённый статус хранится 60 секунд, затем возвращается `not_found`.
+Асинхронный режим хранит счётчики, а не полный список результатов.
 
-The synchronous wrapper receives its own scan messages in a dedicated collector
-process so unrelated caller messages remain untouched. It returns collected results
-sorted by numerical IP and port. A deadline cancels outstanding work and returns
-`{error, deadline_exceeded}`. Do not return partial lists as successful scans.
+Синхронная обёртка получает сообщения своего сканирования через отдельный
+процесс сбора, сохраняя посторонние сообщения вызывающего процесса.
+Она возвращает результаты, отсортированные по числовому IPv4-адресу и порту.
+Истечение предельного срока отменяет оставшуюся работу и возвращает
+`{error, deadline_exceeded}`. Не выдавай частичный список за успешное сканирование.
 
-### Supervision and resource ownership
+### Supervision и владение ресурсами
 
-Extend `trawler_sup` with a bounded probe scheduler and a dynamic scan supervisor.
-Each scan coordinator monitors its caller and recipient. Caller or recipient death
-cancels remaining work; repeated cancellation of a cancelled scan is harmless.
-An active explicit cancellation is idempotent (`ok`); completed/failed scans return
-`already_finished`. Caller death also cleans up the synchronous collector and scan.
+Расширь `trawler_sup` планировщиком проб с лимитом и динамическим supervisor
+процессов сканирования. Каждый координатор следит через monitor за вызывающим
+процессом и получателем. Выход любого из них отменяет оставшуюся работу.
+Повторная отмена уже отменённого сканирования безвредна.
+Явная отмена активного сканирования идемпотентна (`ok`);
+для завершённых и неуспешных сканирований возвращается `already_finished`.
+Выход вызывающего процесса завершает также синхронный процесс сбора и сканирование.
 
-The application-wide `max_concurrency` defaults to 256. Apply both this limit and
-the per-scan limit across concurrent scans; dispatch at most one pending item per
-scan in round-robin order. Derive pending jobs lazily from normalized selections.
-Temporary monitored workers own their sockets, use `gen_tcp:connect` with binary,
-passive IPv4 sockets and a finite timeout, and close successful connections
-immediately. Release scheduler slots on every worker exit. Cancel/timeout paths
-terminate remaining workers, cancel timers and drain owned monitor notifications.
-Use monotonic time. Scan processes are temporary children so crashes cannot restart
-network work silently. Infrastructure failures produce one error terminal event.
+Глобальный `max_concurrency` по умолчанию равен 256.
+Соблюдай его и индивидуальный лимит при одновременных сканированиях.
+Выдавай не более одного ожидающего задания каждому сканированию за один круг.
+Создавай задания по мере необходимости из нормализованных выборок.
+Временные исполнители под monitor владеют своими сокетами, вызывают
+`gen_tcp:connect` с пассивными бинарными IPv4-сокетами и конечным таймаутом
+и сразу закрывают успешные соединения.
+Освобождай место в планировщике при любом выходе исполнителя.
+При отмене или таймауте заверши оставшихся исполнителей, отмени таймеры
+и обработай относящиеся к ним уведомления monitor.
+Используй монотонное время. Процессы сканирования — временные дочерние процессы:
+сбой не должен незаметно перезапускать сетевую работу.
+Инфраструктурная ошибка создаёт одно завершающее событие ошибки.
 
-### Observations
+### Классификация наблюдений
 
-Successful connect means `open`; `econnrefused` means `closed`; TCP timeout means
-`timeout`; `enetunreach` and `ehostunreach` mean `unreachable`; other socket errors
-mean `error` with the original reason. An IP with no open ports is not labelled
-offline. Do not label a timeout `filtered`, because connect alone cannot prove it.
+Успешный connect означает `open`; `econnrefused` — `closed`;
+TCP-таймаут — `timeout`; `enetunreach` и `ehostunreach` — `unreachable`;
+прочие ошибки сокета — `error` с исходной причиной.
+Адрес без открытых портов не объявляется отсутствующим в сети.
+Не называй таймаут `filtered`: одного connect для такого вывода недостаточно.
 
-### CLI contract
+### Контракт CLI
 
 ```text
 trawler scan --targets '192.0.2.1,192.0.2.10-192.0.2.20,198.51.100.0/30' \
   --ports '22,80,443,8000-8010' [--json] [--timeout 1000] [--concurrency 64]
 ```
 
-Targets and ports are required. CLI arguments map directly to the API; no scanning
-logic lives in the CLI. Text output is an IP/port/state table plus a summary. JSON
-output is one object containing `results` and `summary`, with dotted-decimal IPs
-and string states encoded using OTP 27's `json` module. Both formats include all
-observed states. Exit 0 means completed, even if no ports were open; exit 2 means
-invalid arguments; exit 1 means an operational failure. Diagnostics go to stderr,
-JSON data to stdout. Standard Ctrl-C stops the standalone VM and closes its sockets.
+Адреса и порты обязательны. Аргументы CLI прямо передаются API;
+логика сканирования находится в ядре.
+Текстовый вывод содержит таблицу «IP / порт / состояние» и итоговую сводку.
+JSON — один объект с `results` и `summary`, IP в десятичной строке с точками
+и состояниями-строками, закодированный модулем `json` из OTP 27.
+Оба формата содержат все наблюдаемые исходы.
+Код выхода 0 означает завершение, даже если открытых портов нет;
+2 — неверные аргументы; 1 — ошибка выполнения.
+Диагностика направляется в stderr, JSON — в stdout.
+Обычный Ctrl-C останавливает отдельную виртуальную машину и закрывает её сокеты.
 
-## Risks / Trade-offs
+## Риски и компромиссы
 
-TCP-connect scanning cannot establish host absence or distinguish every firewall
-condition. Global limits and lazy dispatch bound async work; synchronous and JSON
-collection retain results proportional to the number of probes. Consumers doing
-large scans should use the async stream. Closed-port tests must reserve ports and
-avoid timing assumptions; timeout classification needs deterministic injected
-probe results rather than relying on an external firewall.
+TCP connect не доказывает отсутствие хоста и не различает все режимы
+межсетевого экрана. Глобальные лимиты и создание заданий по мере необходимости
+ограничивают асинхронную нагрузку; синхронный сбор и JSON хранят результаты
+пропорционально числу проб. Для больших сканирований используй поток событий.
+Тесты закрытых портов должны резервировать порты и не полагаться на случайные
+задержки. Классификация таймаутов проверяется детерминированной подстановкой
+результатов проб, а не внешним межсетевым экраном.
 
-## Migration Plan
+## Порядок внедрения
 
-Add the library API and CLI command in this change. Preserve help/version output
-and standard application startup. Run the entire check suite, review the diff and
-only then archive the change to promote these requirements to current specs.
+Добавить библиотечный API и команду CLI в этом изменении.
+Сохранить справку, версию и стандартный запуск OTP-приложения.
+Выполнить все проверки, проверить diff и только затем архивировать изменение,
+перенося его требования в текущие спецификации.

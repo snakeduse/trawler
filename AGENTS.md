@@ -1,88 +1,115 @@
-# Trawler agent instructions
+# Инструкции для агентов Trawler
 
-## Purpose and current state
+## Назначение и текущее состояние
 
-Trawler is an embeddable Erlang/OTP 27 application with a separate escript CLI.
-The repository currently implements the application lifecycle and CLI help/version.
-The scanner is specified in the pending `add-tcp-ipv4-scanner` OpenSpec change.
-Do not claim that scanning works until that change is implemented and verified.
-User-facing discussion and the README are in Russian; code and OpenSpec artifacts
-use English. Preserve the Apache-2.0 license.
+Trawler — встраиваемое приложение Erlang/OTP 27 с отдельным CLI в формате escript.
+Сейчас в репозитории реализованы запуск и остановка OTP-приложения, справка и версия CLI.
+Сканер описан в подготовленном изменении OpenSpec `add-tcp-ipv4-scanner`.
+Не утверждай, что сканирование работает, пока это изменение не реализовано и не проверено.
+Обсуждения, README, инструкции проекта и документы OpenSpec ведутся на русском языке.
+Стандартные навыки OpenSpec в `.hermes/skills/` сохраняют исходный английский текст.
+Идентификаторы кода, имена команд, ключи конфигурации и служебные маркеры остаются
+в исходном виде. Сохраняй лицензию Apache-2.0.
 
-## Development commands
+## Команды разработки
 
-- `make build` — strict compilation.
-- `make cli` — create `_build/default/bin/trawler`.
-- `make test` — EUnit and Common Test, including escript checks.
-- `make xref`, `make dialyzer` — static checks.
-- `make specs` — strict validation of all changes and current specs.
-- `make consumer` — build and run a separate temporary OTP consumer.
-- `make check` — all required checks.
-- `make docs`, `make shell` — EDoc and an OTP shell.
-- `./scripts/openspec ...` — global OpenSpec 1.14.1 under Node 24.15.0.
-- `./scripts/hermes chat` — project-isolated Hermes session.
+- `make build` — компиляция с предупреждениями как ошибками.
+- `make cli` — создание `_build/default/bin/trawler`.
+- `make test` — EUnit и Common Test, включая проверки escript.
+- `make xref`, `make dialyzer` — статические проверки.
+- `make specs` — строгая валидация всех изменений и текущих спецификаций.
+- `make consumer` — сборка и запуск отдельного временного OTP-приложения-потребителя.
+- `make check` — все обязательные проверки.
+- `make docs`, `make shell` — EDoc и оболочка с запущенным OTP-приложением.
+- `./scripts/openspec ...` — глобальный OpenSpec 1.14.1 в окружении Node 24.15.0.
+- `./scripts/hermes chat` — сессия Hermes с изолированным профилем проекта.
 
-Wrappers activate OTP 27 and the pinned Node installation. Erlang is installed
-through Kerl at `$HOME/erlang/27.3.4.18` on this machine; use `TRAWLER_OTP_ROOT`
-for another location. The library build must not require Node, OpenSpec or Hermes.
+Обёртки подключают OTP 27 и закреплённую версию Node. На этой машине Erlang
+установлен через Kerl в `$HOME/erlang/27.3.4.18`; для другого расположения задай
+`TRAWLER_OTP_ROOT`. Для сборки библиотеки Node, OpenSpec и Hermes не требуются.
 
-## Erlang/OTP conventions
+## Правила Erlang/OTP
 
-Use OTP behaviours and supervised processes; document public types with `-spec`.
-Keep CLI parsing, printing and VM termination in `trawler_cli`, outside the library.
-Keep runtime dependencies minimal; use OTP 27's standard library where suitable.
-Never create atoms from user input. Parse and validate all target/port input before
-network activity. Use monotonic time for durations and deadlines.
-Bound concurrent connections across scans, generate probe work lazily, and clean
-up sockets, monitors and timers on completion, failure, cancellation or owner exit.
-A TCP timeout does not establish that a host is absent. Do not overstate discovery
-or firewall classification. Tests use loopback fixtures, not external networks.
+Используй стандартные OTP behaviours и процессы под supervision.
+Для публичных функций указывай типы через `-spec`.
+Разбор аргументов CLI, печать и завершение виртуальной машины оставляй в
+`trawler_cli`, вне библиотечного ядра. Минимизируй зависимости во время выполнения;
+где подходит, используй стандартную библиотеку OTP 27.
+Не создавай атомы из пользовательского ввода. Проверяй все адреса и порты до
+начала сетевых соединений. Для длительностей и предельных сроков используй
+монотонное время.
+Ограничивай число одновременных соединений между всеми сканированиями, создавай
+задания по мере необходимости, освобождай сокеты, мониторы и таймеры при завершении,
+ошибке, отмене или выходе процесса-владельца.
+TCP-таймаут не доказывает отсутствие компьютера. Не делай необоснованных выводов
+о доступности хоста или работе межсетевого экрана.
+Сетевые тесты используют loopback и локальные тестовые сокеты.
 
-## Automatic OpenSpec workflow and model roles
+## Автоматический цикл OpenSpec и роли моделей
 
-The project launcher selects `deepseek-v4-pro` as the primary Hermes agent and
-`deepseek-flash` for `delegate_task` children, both through provider `deepseek`.
-Pro owns requirements, proposal/design/spec/tasks, task assignment and final review.
-Flash implements bounded code and test tasks. A child does not delegate further.
+Конфигурация проекта выбирает `deepseek-v4-pro` для основного агента Hermes
+и `deepseek-flash` для исполнителей `delegate_task`; обе модели работают
+через провайдер `deepseek`.
+Pro отвечает за требования, proposal/design/spec/tasks, назначение задач и
+итоговую проверку. Flash выполняет ограниченные задачи по коду и тестам.
+Исполнитель не создаёт дополнительных подагентов.
 
-The user's explicit standing policy is a continuous plan-to-implementation cycle
-for development requests. OpenSpec's generated `openspec-propose` skill is a
-planning-only workflow and tells agents to wait for a new apply request. For the
-automatic cycle, generate artifacts using the CLI (`new change`, `status`,
-`instructions`) and continue to delegation under the original development request.
-Do not introduce that skill's extra approval stage. An explicit request to run
-`openspec-propose` or prepare specifications alone remains planning-only.
+Пользователь явно выбрал непрерывный цикл от планирования до реализации
+для запросов на разработку. Созданный OpenSpec навык `openspec-propose`
+предназначен только для планирования и требует новой команды перед реализацией.
+В автоматическом цикле создавай документы через CLI (`new change`, `status`,
+`instructions`) и переходи к делегированию в рамках исходного запроса
+на разработку. Не добавляй отдельное подтверждение из этого навыка.
+Явный запрос на `openspec-propose` или только на подготовку спецификаций
+остаётся запросом на планирование.
 
-For a user request to develop or change behaviour:
+При запросе на разработку или изменение поведения:
 
-1. Read the applicable current specs and relevant code. Discover active changes
-   with `./scripts/openspec list`; use the workflow skills appropriate to the scope.
-2. Pro creates or updates decision-complete OpenSpec artifacts, respecting the
-   user's scope. Validate them with `make specs` before implementation.
-3. Pro automatically delegates implementation to Flash; no separate command or
-   routine approval is needed. Pass the workspace, change name, exact tasks,
-   interfaces, constraints and acceptance checks in the child's context. Fresh
-   children do not have the parent conversation.
-4. Run at most one child at a time in the shared checkout. Wait for its result;
-   inspect the diff and independently run the relevant checks. Return concrete
-   corrections to Flash instead of silently changing its model.
-5. Mark only verified tasks complete. After all work and `make check` pass, archive
-   the completed change using OpenSpec's archive workflow, updating current specs.
-   Report what changed, validation and any remaining limitations.
+1. Прочитай применимые текущие спецификации и соответствующий код.
+   Найди активные изменения командой `./scripts/openspec list`;
+   используй навыки, подходящие к объёму запроса.
+2. Pro создаёт или обновляет документы OpenSpec с принятыми решениями,
+   соблюдая объём задачи пользователя. До реализации проверь их через `make specs`.
+3. Pro автоматически поручает реализацию Flash: отдельная команда или обычное
+   подтверждение не нужны. Передай исполнителю рабочий каталог, имя изменения,
+   конкретные задачи, интерфейсы, ограничения и критерии приёмки.
+   Новый исполнитель не видит историю разговора основного агента.
+4. Запускай не более одного исполнителя одновременно в общей рабочей копии.
+   Дождись результата, проверь diff и самостоятельно выполни нужные проверки.
+   Возвращай конкретные замечания Flash, не меняя его модель незаметно.
+5. Отмечай выполненными только проверенные задачи. После завершения всех работ
+   и успешного `make check` архивируй изменение средствами OpenSpec,
+   обновляя текущие спецификации. Сообщи о результате, проверках и ограничениях.
 
-For requests limited to planning, documentation or project preparation, complete
-that scope and leave future implementation tasks unchecked. Do not apply a pending
-scanner change merely because it exists. Ask only about material ambiguity or a
-genuinely required permission; do not add a separate Flash approval stage.
+Если запрос ограничен планированием, документацией или подготовкой проекта,
+выполни этот объём и оставь будущие задачи реализации без отметок выполнения.
+Наличие подготовленного изменения сканера само по себе не разрешает его применять.
+Уточняй только существенные неоднозначности или действительно необходимые разрешения;
+не вводи отдельный этап подтверждения для Flash.
 
-## Configuration and secrets
+## Язык документов и формат OpenSpec
 
-`.hermes/config.yaml` is the versioned source of truth. The launcher materializes
-it under `.hermes/runtime/`, the ignored `HERMES_HOME`, and connects the project
-OpenSpec skills using `skills.external_dirs`. Edit the source config, not the
-generated runtime copy. Sessions, memory, logs and checkpoints are local state.
-Use `DEEPSEEK_API_KEY` from the process environment, the ignored runtime `.env`,
-or the existing user Hermes `.env`. Never print or commit credentials, copy all
-user configuration, or enable an alternative model as a silent fallback.
+Содержательные тексты пиши по-русски. Сохраняй служебные заголовки и маркеры,
+которые разбирает OpenSpec: `Purpose`, `Requirements`, `Requirement:`,
+`Scenario:`, `ADDED/MODIFIED/REMOVED/RENAMED Requirements`, `WHEN`, `THEN`,
+`AND`, `SHALL`, `MUST`, а также обязательные заголовки proposal.
+Слова `SHALL` и `MUST` обозначают обязательное требование; рядом можно написать
+«должно», например: «Приложение должно (SHALL) запускаться через OTP».
+При переводе названий требований и сценариев сохраняй их соответствие между
+основной спецификацией и изменением. Не переводи команды, API, пути и ключи YAML/JSON.
+Стандартные файлы `.hermes/skills/*/SKILL.md` не переводи; сохраняй их в исходном
+виде, полученном от OpenSpec. Это исключение из языкового правила документации проекта.
 
-Do not commit, push or publish artifacts unless the user requests it.
+## Конфигурация и секреты
+
+`.hermes/config.yaml` — основная версия конфигурации, хранящаяся в Git.
+Обёртка создаёт её рабочую копию в `.hermes/runtime/`, игнорируемом каталоге
+`HERMES_HOME`, и подключает навыки OpenSpec через `skills.external_dirs`.
+Редактируй исходную конфигурацию, а не создаваемую рабочую копию.
+Сессии, память, журналы и контрольные точки относятся к локальному состоянию.
+Используй `DEEPSEEK_API_KEY` из окружения процесса, игнорируемого runtime-файла
+`.env` или существующего пользовательского файла Hermes `.env`.
+Никогда не печатай и не добавляй в Git секреты, не копируй всю пользовательскую
+конфигурацию и не включай другую модель как скрытый запасной маршрут.
+
+Не создавай коммиты, не выполняй push и не публикуй результаты без запроса пользователя.

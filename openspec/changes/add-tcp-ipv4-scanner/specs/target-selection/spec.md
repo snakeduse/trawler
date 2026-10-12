@@ -1,44 +1,45 @@
-# Target Selection
+# Выбор адресов и портов
 
 ## Purpose
 
-Define predictable IPv4 host and TCP port selections that callers can compose,
-validate and deduplicate before starting network operations.
+Определить понятные выборки IPv4-адресов и TCP-портов, которые можно объединять,
+проверять и очищать от повторов до начала сетевых операций.
 
 ## ADDED Requirements
 
-### Requirement: IPv4 selections
-The scanner SHALL accept single IPv4 addresses, lists, inclusive full-address
-ranges and CIDR selections through the documented Erlang and CLI input forms.
-It SHALL normalize CIDR host bits, include all addresses in the subnet and probe
-each selected address/port pair at most once.
+### Requirement: Выбор IPv4-адресов
+Сканер должен (SHALL) принимать отдельные IPv4-адреса, списки, включительные
+диапазоны полных адресов и CIDR в описанных форматах Erlang и CLI.
+Он должен (SHALL) нормализовать биты хоста в CIDR, включать все адреса подсети
+и проверять каждую выбранную пару «адрес / порт» не более одного раза.
 
-#### Scenario: Mixed overlapping targets
-- **WHEN** a caller combines individual addresses, ranges and overlapping CIDR blocks
-- **THEN** each unique selected IPv4 address is represented exactly once
+#### Scenario: Смешанные пересекающиеся адреса
+- **WHEN** вызывающий объединяет адреса, диапазоны и пересекающиеся блоки CIDR
+- **THEN** каждый уникальный IPv4-адрес представлен ровно один раз
 
-#### Scenario: CIDR boundaries
-- **WHEN** a caller selects `192.0.2.5/30`
-- **THEN** addresses `192.0.2.4` through `192.0.2.7` are included
-- **AND** `/32` selects exactly one address
+#### Scenario: Границы CIDR
+- **WHEN** вызывающий выбирает `192.0.2.5/30`
+- **THEN** включаются адреса от `192.0.2.4` до `192.0.2.7`
+- **AND** `/32` выбирает ровно один адрес
 
-### Requirement: Port selections
-The scanner SHALL accept individual TCP ports, lists and inclusive ranges in
-1..65535, deduplicating overlaps and rejecting zero or invalid range bounds.
+### Requirement: Выбор портов
+Сканер должен (SHALL) принимать отдельные TCP-порты, списки и включительные
+диапазоны в пределах 1..65535, устранять повторы и отклонять ноль
+или неверные границы диапазона.
 
-#### Scenario: Mixed port inputs
-- **WHEN** a caller selects `22,80,80-82`
-- **THEN** selected ports are exactly 22, 80, 81 and 82
+#### Scenario: Смешанные порты
+- **WHEN** вызывающий выбирает `22,80,80-82`
+- **THEN** выбраны ровно порты 22, 80, 81 и 82
 
-### Requirement: Validation before probing
-Malformed, empty, descending, non-IPv4 or excessive host selections SHALL produce
-an input error before any connection is attempted. Large selections SHALL be
-checked against the configured maximum host count before address expansion.
+### Requirement: Проверка до начала проб
+Ошибочные, пустые, обратные, не-IPv4 или чрезмерные выборки должны (SHALL)
+возвращать ошибку ввода до любых соединений.
+Большие выборки должны (SHALL) проверяться по лимиту хостов до разворачивания адресов.
 
-#### Scenario: Invalid selection
-- **WHEN** an input contains an invalid octet, CIDR prefix, empty token or reversed range
-- **THEN** the request is rejected and no TCP connections are attempted
+#### Scenario: Неверная выборка
+- **WHEN** ввод содержит неверный октет, префикс CIDR, пустой элемент или обратный диапазон
+- **THEN** запрос отклоняется и TCP-соединения не создаются
 
-#### Scenario: Excessive host count
-- **WHEN** a normalized selection exceeds the configured `max_hosts`
-- **THEN** the request returns `too_many_hosts` without expanding the full address space
+#### Scenario: Превышение числа хостов
+- **WHEN** нормализованная выборка превышает настроенный `max_hosts`
+- **THEN** запрос возвращает `too_many_hosts` без разворачивания всего пространства адресов

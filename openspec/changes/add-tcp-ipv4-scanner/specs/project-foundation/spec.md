@@ -1,24 +1,24 @@
-# Project Foundation Delta
+# Изменение основы проекта
 
 ## MODIFIED Requirements
 
-### Requirement: Foundation CLI
-The escript SHALL provide help and its application version, support the scan
-command through the public scanning API, and return a nonzero exit code for
-unsupported or invalid arguments.
+### Requirement: CLI каркаса
+Escript должен (SHALL) показывать справку и версию приложения, поддерживать
+команду сканирования через публичный API и возвращать ненулевой код
+для неподдерживаемых или неверных аргументов.
 
-#### Scenario: Help is requested
-- **WHEN** the user runs `trawler --help`
-- **THEN** usage including scanning options is printed and the process exits with code 0
+#### Scenario: Запрос справки
+- **WHEN** пользователь запускает `trawler --help`
+- **THEN** выводится справка с параметрами сканирования и процесс завершается с кодом 0
 
-#### Scenario: Version is requested
-- **WHEN** the user runs `trawler --version`
-- **THEN** the application version is printed and the process exits with code 0
+#### Scenario: Запрос версии
+- **WHEN** пользователь запускает `trawler --version`
+- **THEN** выводится версия приложения и процесс завершается с кодом 0
 
-#### Scenario: A valid scan is requested
-- **WHEN** valid arguments are passed to the scan command
-- **THEN** the shared scanning API is invoked and its observations are formatted
+#### Scenario: Запрос корректного сканирования
+- **WHEN** команде сканирования переданы корректные аргументы
+- **THEN** вызывается общий API сканирования и его наблюдения форматируются для вывода
 
-#### Scenario: Unsupported arguments are supplied
-- **WHEN** an unknown command or invalid option is supplied
-- **THEN** the process exits with code 2 and prints a diagnostic to stderr
+#### Scenario: Неподдерживаемые аргументы
+- **WHEN** передана неизвестная команда или неверная опция
+- **THEN** процесс завершается с кодом 2 и выводит диагностику в stderr

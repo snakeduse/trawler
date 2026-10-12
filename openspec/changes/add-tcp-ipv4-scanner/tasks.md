@@ -1,30 +1,30 @@
-## 1. Selection normalization
+## 1. Нормализация адресов и портов
 
-- [ ] 1.1 Implement documented target/port input contracts, validation and deduplication with public types.
-- [ ] 1.2 Add EUnit cases for individual/list/range/CIDR inputs, boundaries, host-bit normalization, overlap, empty/malformed/descending selections and excessive host counts.
+- [ ] 1.1 Реализовать описанные форматы адресов и портов, проверку, устранение повторов и публичные типы.
+- [ ] 1.2 Добавить EUnit для адресов, списков, диапазонов и CIDR, границ, нормализации битов хоста, пересечений, пустого и ошибочного ввода, обратных диапазонов и превышения числа хостов.
 
-## 2. Supervised TCP execution
+## 2. TCP-пробы под supervision
 
-- [ ] 2.1 Add the bounded global scheduler, lazy job generation and temporary scan/worker supervision.
-- [ ] 2.2 Implement finite-timeout connect probing and the documented observation classification.
-- [ ] 2.3 Verify per-scan/global limits and cleanup on success, worker failure, cancellation, deadline and owner/recipient death.
+- [ ] 2.1 Добавить глобальный планировщик с лимитом, создание заданий по мере необходимости и supervision временных процессов сканирования и проб.
+- [ ] 2.2 Реализовать TCP connect с конечным таймаутом и описанную классификацию наблюдений.
+- [ ] 2.3 Проверить глобальный и индивидуальный лимиты, освобождение ресурсов при успехе, ошибке исполнителя, отмене, истечении срока и выходе владельца или получателя.
 
-## 3. Public Erlang API
+## 3. Публичный Erlang API
 
-- [ ] 3.1 Implement start_scan/3, status/1 and cancel/1, recipient events, exactly one terminal event and terminal status expiry.
-- [ ] 3.2 Implement scan/3 with an isolated synchronous collector and deterministic result order.
-- [ ] 3.3 Add loopback Common Test scenarios for open/closed ports, concurrent scans, cancellation, lifecycle failures and consumer integration; inject timeout outcomes deterministically.
+- [ ] 3.1 Реализовать start_scan/3, status/1 и cancel/1, события получателю, ровно одно завершающее событие и срок хранения завершённого статуса.
+- [ ] 3.2 Реализовать scan/3 с отдельным процессом сбора и определённым порядком результатов.
+- [ ] 3.3 Добавить Common Test на loopback для открытых и закрытых портов, одновременных сканирований, отмены, ошибок жизненного цикла и подключения потребителя; таймауты проверять через детерминированную подстановку результатов.
 
-## 4. CLI adapter
+## 4. Адаптер CLI
 
-- [ ] 4.1 Add scan arguments, API delegation, text/JSON output and documented exit statuses.
-- [ ] 4.2 Test CLI parity with the library, JSON validity, diagnostics, invalid inputs and preserved help/version behavior.
+- [ ] 4.1 Добавить аргументы scan, вызовы API, текстовый и JSON-вывод и описанные коды выхода.
+- [ ] 4.2 Проверить соответствие CLI библиотеке, корректность JSON, диагностику, ошибочный ввод и сохранение справки и версии.
 
-## 5. Review and completion
+## 5. Проверка и завершение
 
-- [ ] 5.1 Update README and EDoc with working examples and resource/result limitations.
-- [ ] 5.2 Pro reviews the diff and independently runs make check and an external Erlang-consumer smoke test.
-- [ ] 5.3 Confirm that the implementation satisfies every delta scenario and is ready for promotion.
+- [ ] 5.1 Обновить README и EDoc рабочими примерами и описанием ограничений ресурсов и результатов.
+- [ ] 5.2 Pro проверяет diff и самостоятельно запускает make check и проверку отдельного Erlang-приложения-потребителя.
+- [ ] 5.3 Подтвердить выполнение каждого сценария delta-спецификаций и готовность к переносу в основные спецификации.
 
-After all tasks are verified, archive the change using the OpenSpec workflow and
-validate the promoted current specs.
+После проверки всех задач архивировать изменение средствами OpenSpec
+и проверить обновлённые текущие спецификации.
