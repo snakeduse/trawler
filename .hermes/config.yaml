@@ -2,9 +2,9 @@
 _config_version: 50
 
 model:
-  provider: deepseek
-  default: deepseek-v4-pro
-  api_mode: chat_completions
+  provider: openai-codex
+  default: gpt-6.1-sol
+  api_mode: codex_responses
 fallback_providers: []
 
 terminal:
@@ -31,6 +31,11 @@ delegation:
 
 agent:
   max_turns: 60
+  reasoning_effort: medium
+
+auxiliary:
+  background_review:
+    enabled: true
 
 checkpoints:
   enabled: true
