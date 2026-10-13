@@ -11,11 +11,12 @@
 -module(trawler_cli_SUITE).
 
 -export([all/0, help/1, version/1, unsupported/1,
-         scan_text/1, scan_json/1, scan_invalid/1, scan_no_open/1]).
+         scan_text/1, scan_json/1, scan_invalid/1, scan_no_open/1,
+         scan_default_ports/1]).
 
 all() ->
     [help, version, unsupported,
-     scan_text, scan_json, scan_invalid, scan_no_open].
+     scan_text, scan_json, scan_invalid, scan_no_open, scan_default_ports].
 
 %%% ------------------------------------------------------------------
 %%% Справка, версия и неизвестная команда
@@ -87,8 +88,6 @@ scan_json(Config) ->
 %%% ------------------------------------------------------------------
 
 scan_invalid(Config) ->
-    %% Нет обязательного --ports.
-    {2, _} = run(["scan", "--targets", "127.0.0.1"], Config),
     %% Нет обязательного --targets.
     {2, _} = run(["scan", "--ports", "80"], Config),
     %% Неверный адрес отклоняется до сетевых операций.
@@ -110,6 +109,13 @@ scan_no_open(Config) ->
                        "--ports", integer_to_list(Port)], Config),
     must_contain(Output, <<"closed">>),
     must_contain(Output, <<"Summary:">>),
+    ok.
+
+%% Без --ports сканирование использует набор по умолчанию из 1000 портов.
+scan_default_ports(Config) ->
+    {0, Output} = run(["scan", "--targets", "127.0.0.1"], Config),
+    must_contain(Output, <<"Summary:">>),
+    must_contain(Output, <<"total=1000">>),
     ok.
 
 %%% ------------------------------------------------------------------

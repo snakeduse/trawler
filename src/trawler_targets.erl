@@ -22,7 +22,8 @@
 %% Включительный диапазон портов; первая граница не больше последней.
 -type port_range() :: {1..65535, 1..65535}.
 -type targets_input() :: binary() | [ip4() | binary()].
--type ports_input() :: binary() | [1..65535 | {range, 1..65535, 1..65535}].
+-type ports_input() :: binary() | [1..65535 | {range, 1..65535, 1..65535}]
+                     | default.
 -type reason() :: {invalid_targets, term()} | {invalid_ports, term()}
                 | too_many_hosts.
 
@@ -45,6 +46,8 @@ parse_targets(Input) when is_list(Input) ->
     end.
 
 -spec parse_ports(ports_input()) -> {ok, [port_range()]} | {error, reason()}.
+parse_ports(default) ->
+    {ok, [{P, P} || P <- trawler_ports:default()]};
 parse_ports(Input) when is_binary(Input) ->
     parse_port_elements(binary:split(Input, <<",">>, [global]));
 parse_ports(Input) when is_list(Input) ->

@@ -146,6 +146,12 @@ In both branches, never create the root as a side effect: do not run `openspec i
    openspec status --change "<name>"
    ```
 
+8. **Validate the change** (recommended before handing off)
+   ```bash
+   openspec validate --changes "<name>" --strict
+   ```
+   `validate` takes `--changes` (plural) even for a single change — passing `--change` is rejected as an unknown option. `status`, `instructions`, and `show` take `--change` (singular).
+
 **Output**
 
 After completing all artifacts, summarize:

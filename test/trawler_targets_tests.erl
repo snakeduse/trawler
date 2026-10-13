@@ -391,6 +391,13 @@ reversed_port_range_test() ->
     ?assertEqual({error, {invalid_ports, {range, 80, 22}}},
                  trawler_targets:parse_ports([{range, 80, 22}])).
 
+default_ports_test() ->
+    {ok, Ranges} = trawler_targets:parse_ports(default),
+    ?assertEqual(1000, length(Ranges)),
+    ?assertEqual(1000, trawler_targets:count_ports(Ranges)),
+    ?assertEqual({80, 80}, hd(Ranges)),
+    ?assertEqual([{P, P} || P <- trawler_ports:default()], Ranges).
+
 %%% ------------------------------------------------------------------
 %%% Счётчики
 %%% ------------------------------------------------------------------

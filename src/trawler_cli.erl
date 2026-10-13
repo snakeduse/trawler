@@ -40,14 +40,15 @@ help() ->
         "Trawler - встраиваемый сканер сети на Erlang/OTP\n\n"
         "Использование:\n"
         "  trawler [--help | -h | --version]\n"
-        "  trawler scan --targets <TARGETS> --ports <PORTS> [опции]\n\n"
+        "  trawler scan --targets <TARGETS> [--ports <PORTS>] [опции]\n\n"
         "Команды:\n"
         "  scan                  Просканировать адреса и порты по TCP\n\n"
         "Параметры scan:\n"
         "  --targets <TARGETS>   Обязательно. Адреса IPv4 и/или сети через\n"
         "                        запятую: 127.0.0.1,10.0.0.0/30\n"
-        "  --ports <PORTS>       Обязательно. Порты и/или диапазоны через\n"
-        "                        запятую: 22,80,8000-8010\n"
+        "  --ports <PORTS>       Необязательно. Порты и/или диапазоны через\n"
+        "                        запятую: 22,80,8000-8010. По умолчанию —\n"
+        "                        1000 наиболее популярных портов.\n"
         "  --json                Вывести один JSON-объект вместо таблицы\n"
         "  --timeout <N>         Таймаут одной пробы в миллисекундах (N > 0)\n"
         "  --concurrency <N>     Одновременных проб на сканирование (N > 0)\n\n"
@@ -98,9 +99,8 @@ scan(Args) ->
             erlang:halt(2)
     end.
 
-%% Разбор аргументов: обязательные --targets и --ports, необязательные
-%% --json, --timeout N, --concurrency N. Порядок не важен, повтор любого
-%% ключа — ошибка.
+%% Разбор аргументов: обязательный --targets, необязательные --ports, --json,
+%% --timeout N, --concurrency N. Порядок не важен, повтор любого ключа — ошибка.
 parse_args(["--json" | Rest], Acc, Seen) ->
     case lists:member(json, Seen) of
         true ->
@@ -121,12 +121,10 @@ parse_args([Option | Rest], Acc, Seen) ->
             {error, "unknown option " ++ Option}
     end;
 parse_args([], Acc, Seen) ->
-    case {lists:member(targets, Seen), lists:member(ports, Seen)} of
-        {false, _} ->
+    case lists:member(targets, Seen) of
+        false ->
             {error, "missing required option --targets"};
-        {_, false} ->
-            {error, "missing required option --ports"};
-        {true, true} ->
+        true ->
             {ok, Acc}
     end.
 
@@ -173,7 +171,7 @@ run_scan(Parsed) ->
 
 do_scan(Parsed) ->
     Targets = to_binary(maps:get(targets, Parsed)),
-    Ports = to_binary(maps:get(ports, Parsed)),
+    Ports = ports_value(Parsed),
     Options = scan_options(Parsed),
     Start = erlang:monotonic_time(millisecond),
     case trawler:scan(Targets, Ports, Options) of
@@ -198,6 +196,13 @@ add_option(CliKey, ApiKey, Parsed, Acc) ->
     case maps:find(CliKey, Parsed) of
         {ok, Value} -> Acc#{ApiKey => Value};
         error -> Acc
+    end.
+
+%% Без --ports используется набор по умолчанию из публичного API.
+ports_value(Parsed) ->
+    case maps:find(ports, Parsed) of
+        {ok, Value} -> to_binary(Value);
+        error -> default
     end.
 
 to_binary(Value) ->
