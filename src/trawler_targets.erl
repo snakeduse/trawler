@@ -6,6 +6,25 @@
 %%% лимит `max_hosts' из окружения приложения `trawler' (по умолчанию
 %%% 65536). Все выборки нормализуются, сортируются и очищаются от
 %%% повторов до любых сетевых операций.
+%%%
+%%% Выборка адресов принимает старые формы (одиночный адрес, CIDR,
+%%% включительный диапазон полных адресов через дефис) и пооктетные
+%%% выражения: ровно четыре октета через точку, октет — непустой
+%%% список десятичных чисел 0..255 и включительных диапазонов через
+%%% запятую, например `10-11.20-21.30-31.40-41' или
+%%% `192.168.3-5,7.1,3-4'. Пропущенная левая граница диапазона
+%%% означает 0, правая — 255: `192.0.2.-' задаёт весь последний октет,
+%%% `192.0.2.-1' — значения 0 и 1, `192.0.2.10-' — 10..255. Ведущие
+%%% нули, знак, обратные границы, двойной дефис, пустые элементы и
+%%% пробелы внутри выражения запрещены; CIDR сочетается только с
+%%% обычным одиночным адресом.
+%%%
+%%% Общий бинарный ввод сначала проверяется как старый список через
+%%% запятую с обрезкой пробелов; иначе он делится по ASCII-пробелу,
+%%% табуляции, CR и LF, и каждый фрагмент — старый список либо одно
+%%% пооктетное выражение. Выбор грамматики не зависит от `max_hosts'.
+%%% Размер пооктетного произведения проверяется до его разворачивания,
+%%% а лимит применяется к объединению уникальных адресов всех целей.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(trawler_targets).
@@ -38,11 +57,16 @@
 
 -spec parse_targets(targets_input()) -> {ok, [addr_range()]} | {error, reason()}.
 parse_targets(Input) when is_binary(Input) ->
-    parse_target_elements(binary:split(Input, <<",">>, [global]));
+    parse_binary_input(Input);
 parse_targets(Input) when is_list(Input) ->
     case Input of
-        [] -> {error, {invalid_targets, []}};
-        _ -> parse_target_elements(Input)
+        [] ->
+            {error, {invalid_targets, []}};
+        _ ->
+            case list_specs(Input, []) of
+                {ok, Specs} -> finish(Specs);
+                {error, Reason} -> {error, Reason}
+            end
     end.
 
 -spec parse_ports(ports_input()) -> {ok, [port_range()]} | {error, reason()}.
@@ -80,45 +104,110 @@ int_to_ip(Int) when is_integer(Int), Int >= 0, Int =< ?MAX_IPV4_INT ->
 %%% Адреса
 %%% ------------------------------------------------------------------
 
-parse_target_elements(Elements) ->
-    case target_ranges(Elements, []) of
-        {ok, Ranges} ->
-            IntRanges = [addr_to_int_range(Range) || Range <- Ranges],
-            Merged = [int_to_addr_range(Range)
-                      || Range <- merge_ranges(IntRanges)],
-            check_host_limit(Merged);
-        {error, Reason} ->
-            {error, Reason}
+%% Числовой интервал адресов, включительно.
+-type int_range() :: {non_neg_integer(), non_neg_integer()}.
+%% Объединение значений одного октета: отсортированные несмежные интервалы.
+-type octet_union() :: [{0..255, 0..255}].
+%% Пооктетная цель: объединения значений четырёх октетов.
+-type octet_spec() :: {octet_union(), octet_union(), octet_union(), octet_union()}.
+%% Разобранная цель: сжатый интервал либо пооктетное произведение.
+-type target_spec() :: {range, int_range()} | {octets, octet_spec()}.
+
+%% Общий бинарный ввод: сначала старый список через запятую, иначе
+%% фрагменты по ASCII-пробельным символам.
+-spec parse_binary_input(binary()) ->
+          {ok, [addr_range()]}
+        | {error, {invalid_targets, binary()} | too_many_hosts}.
+parse_binary_input(Bin) ->
+    case legacy_list_specs(Bin) of
+        {ok, Specs} ->
+            finish(Specs);
+        {error, _Reason} ->
+            case whitespace_fragments(Bin) of
+                [] -> {error, {invalid_targets, <<>>}};
+                Fragments -> finish_specs(fragment_specs(Fragments, []))
+            end
     end.
 
-addr_to_int_range({First, Last}) ->
-    {ip_to_int(First), ip_to_int(Last)}.
+finish_specs({ok, Specs}) -> finish(Specs);
+finish_specs({error, Reason}) -> {error, Reason}.
 
-int_to_addr_range({First, Last}) ->
-    {int_to_ip(First), int_to_ip(Last)}.
+%% Старый список: элементы через запятую с обрезкой пробелов. При
+%% ошибке возвращается первый неразобранный элемент, включая пустой.
+-spec legacy_list_specs(binary()) -> {ok, [target_spec()]} | {error, binary()}.
+legacy_list_specs(Bin) ->
+    legacy_list_specs(binary:split(Bin, <<",">>, [global]), []).
 
-target_ranges([], Acc) ->
-    {ok, Acc};
-target_ranges([Element | Rest], Acc) ->
-    case element_range(Element) of
-        {ok, Range} -> target_ranges(Rest, [Range | Acc]);
-        {error, Bad} -> {error, {invalid_targets, Bad}}
+legacy_list_specs([], Acc) ->
+    {ok, lists:reverse(Acc)};
+legacy_list_specs([Element | Rest], Acc) ->
+    Trimmed = string:trim(Element),
+    case element_range_bin(Trimmed) of
+        {ok, Range} -> legacy_list_specs(Rest, [{range, Range} | Acc]);
+        error -> {error, Trimmed}
     end.
 
-%% Один элемент входной выборки: либо готовый ip4()-кортеж, либо
-%% бинарная строка с одиночным адресом, диапазоном или CIDR.
-element_range(Bin) when is_binary(Bin) ->
+%% Пробельное разделение новых целей: пробел, табуляция, CR и LF.
+whitespace_fragments(Bin) ->
+    [Fragment
+     || Fragment <- binary:split(Bin, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>],
+                                 [global]),
+        Fragment =/= <<>>].
+
+fragment_specs([], Acc) ->
+    {ok, lists:append(lists:reverse(Acc))};
+fragment_specs([Fragment | Rest], Acc) ->
+    case fragment_specs_one(Fragment) of
+        {ok, Specs} -> fragment_specs(Rest, [Specs | Acc]);
+        {error, _} = Error -> Error
+    end.
+
+%% Один фрагмент: старый список либо одно пооктетное выражение.
+%% Выбор грамматики не зависит от лимита хостов.
+fragment_specs_one(Fragment) ->
+    case legacy_list_specs(Fragment) of
+        {ok, Specs} ->
+            {ok, Specs};
+        {error, BadElement} ->
+            case octet_spec(Fragment) of
+                {ok, Spec} -> {ok, [{octets, Spec}]};
+                error -> {error, {invalid_targets, BadElement}}
+            end
+    end.
+
+-spec list_specs([ip4() | binary()], [target_spec()]) ->
+          {ok, [target_spec()]} | {error, {invalid_targets, binary()}}.
+list_specs([], Acc) ->
+    {ok, lists:reverse(Acc)};
+list_specs([Element | Rest], Acc) ->
+    case element_spec(Element) of
+        {ok, Spec} -> list_specs(Rest, [Spec | Acc]);
+        {error, _} = Error -> Error
+    end.
+
+%% Элемент Erlang-списка: ip4()-кортеж либо одна цель в бинарной
+%% строке (старая форма или пооктетное выражение).
+element_spec(Bin) when is_binary(Bin) ->
     Trimmed = string:trim(Bin),
     case element_range_bin(Trimmed) of
-        {ok, Range} -> {ok, Range};
-        error -> {error, Trimmed}
+        {ok, Range} ->
+            {ok, {range, Range}};
+        error ->
+            case octet_spec(Trimmed) of
+                {ok, Spec} -> {ok, {octets, Spec}};
+                error -> {error, {invalid_targets, Trimmed}}
+            end
     end;
-element_range({A, B, C, D}) when is_integer(A), A >= 0, A =< 255,
-                                 is_integer(B), B >= 0, B =< 255,
-                                 is_integer(C), C >= 0, C =< 255,
-                                 is_integer(D), D >= 0, D =< 255 ->
-    {ok, {{A, B, C, D}, {A, B, C, D}}}.
+element_spec({A, B, C, D}) when is_integer(A), A >= 0, A =< 255,
+                                is_integer(B), B >= 0, B =< 255,
+                                is_integer(C), C >= 0, C =< 255,
+                                is_integer(D), D >= 0, D =< 255 ->
+    Addr = ip_to_int({A, B, C, D}),
+    {ok, {range, {Addr, Addr}}}.
 
+%% Старая форма одной цели: одиночный IPv4, CIDR или включительный
+%% диапазон полных адресов. Возвращается числовой интервал адресов.
+-spec element_range_bin(binary()) -> {ok, int_range()} | error.
 element_range_bin(<<>>) ->
     error;
 element_range_bin(Bin) ->
@@ -133,7 +222,7 @@ element_range_bin(Bin) ->
 
 single_range(Bin) ->
     case parse_ip(Bin) of
-        {ok, Addr} -> {ok, {Addr, Addr}};
+        {ok, Addr} -> {ok, single_int_range(Addr)};
         error -> error
     end.
 
@@ -142,8 +231,10 @@ address_range(Bin) ->
         [FirstBin, LastBin] ->
             case {parse_ip(FirstBin), parse_ip(LastBin)} of
                 {{ok, First}, {ok, Last}} ->
-                    case ip_to_int(First) =< ip_to_int(Last) of
-                        true -> {ok, {First, Last}};
+                    FirstInt = ip_to_int(First),
+                    LastInt = ip_to_int(Last),
+                    case FirstInt =< LastInt of
+                        true -> {ok, {FirstInt, LastInt}};
                         false -> error
                     end;
                 _ -> error
@@ -158,11 +249,107 @@ cidr_range(Bin) ->
                 {{ok, Addr}, {ok, Prefix}} ->
                     Base = ip_to_int(Addr) band cidr_mask(Prefix),
                     Size = 1 bsl (?MAX_PREFIX - Prefix),
-                    {ok, {int_to_ip(Base), int_to_ip(Base + Size - 1)}};
+                    {ok, {Base, Base + Size - 1}};
                 _ -> error
             end;
         _ -> error
     end.
+
+single_int_range(Addr) ->
+    Int = ip_to_int(Addr),
+    {Int, Int}.
+
+%%% ------------------------------------------------------------------
+%%% Пооктетная грамматика
+%%% ------------------------------------------------------------------
+
+%% Пооктетная цель: ровно четыре октета через точку.
+-spec octet_spec(binary()) -> {ok, octet_spec()} | error.
+octet_spec(Bin) ->
+    case binary:split(Bin, <<".">>, [global]) of
+        [F1, F2, F3, F4] ->
+            case {octet_union(F1), octet_union(F2),
+                  octet_union(F3), octet_union(F4)} of
+                {{ok, U1}, {ok, U2}, {ok, U3}, {ok, U4}} ->
+                    {ok, {U1, U2, U3, U4}};
+                _ -> error
+            end;
+        _ -> error
+    end.
+
+%% Октет: непустой список элементов через запятую.
+-spec octet_union(binary()) -> {ok, octet_union()} | error.
+octet_union(<<>>) ->
+    error;
+octet_union(Bin) ->
+    octet_elements(binary:split(Bin, <<",">>, [global]), []).
+
+octet_elements([], Acc) ->
+    {ok, merge_ranges(Acc)};
+octet_elements([Element | Rest], Acc) ->
+    case octet_element(Element) of
+        {ok, Range} -> octet_elements(Rest, [Range | Acc]);
+        error -> error
+    end.
+
+%% Элемент октета: число 0..255 либо диапазон a-b, a-, -b, -.
+octet_element(<<>>) ->
+    error;
+octet_element(Bin) ->
+    case binary:split(Bin, <<"-">>, [global]) of
+        [Single] ->
+            case parse_octet(Single) of
+                {ok, Value} -> {ok, {Value, Value}};
+                error -> error
+            end;
+        [FirstBin, LastBin] ->
+            octet_bounds(FirstBin, LastBin);
+        _ ->
+            error
+    end.
+
+%% Пропущенная граница диапазона означает 0 слева и 255 справа.
+octet_bounds(<<>>, <<>>) ->
+    {ok, {0, 255}};
+octet_bounds(<<>>, LastBin) ->
+    case parse_octet(LastBin) of
+        {ok, Last} -> {ok, {0, Last}};
+        error -> error
+    end;
+octet_bounds(FirstBin, <<>>) ->
+    case parse_octet(FirstBin) of
+        {ok, First} -> {ok, {First, 255}};
+        error -> error
+    end;
+octet_bounds(FirstBin, LastBin) ->
+    case {parse_octet(FirstBin), parse_octet(LastBin)} of
+        {{ok, First}, {ok, Last}} when First =< Last -> {ok, {First, Last}};
+        _ -> error
+    end.
+
+%% Декартово произведение октетов в возрастающем порядке: значения
+%% каждого октета упорядочены, поэтому интервалы собираются за проход.
+product_intervals({U1, U2, U3, U4}) ->
+    Addresses = [O1 * 16777216 + O2 * 65536 + O3 * 256 + O4
+                 || O1 <- union_values(U1), O2 <- union_values(U2),
+                    O3 <- union_values(U3), O4 <- union_values(U4)],
+    addresses_to_intervals(Addresses).
+
+union_values(Union) ->
+    lists:append([lists:seq(First, Last) || {First, Last} <- Union]).
+
+addresses_to_intervals([]) ->
+    [];
+addresses_to_intervals([Address | Rest]) ->
+    addresses_to_intervals(Rest, Address, Address, []).
+
+addresses_to_intervals([], Start, End, Acc) ->
+    lists:reverse([{Start, End} | Acc]);
+addresses_to_intervals([Address | Rest], Start, End, Acc)
+  when Address =:= End + 1 ->
+    addresses_to_intervals(Rest, Start, Address, Acc);
+addresses_to_intervals([Address | Rest], Start, End, Acc) ->
+    addresses_to_intervals(Rest, Address, Address, [{Start, End} | Acc]).
 
 cidr_mask(Prefix) ->
     (16#FFFFFFFF bsl (?MAX_PREFIX - Prefix)) band 16#FFFFFFFF.
@@ -241,11 +428,78 @@ merge_sorted([{First, Last} | Rest], [{PrevFirst, PrevLast} | AccRest]) ->
             merge_sorted(Rest, [{First, Last}, {PrevFirst, PrevLast} | AccRest])
     end.
 
-check_host_limit(Ranges) ->
-    case count_hosts(Ranges) > max_hosts() of
-        true -> {error, too_many_hosts};
-        false -> {ok, Ranges}
+%% Объединение всех целей в отсортированные несмежные интервалы с
+%% инкрементальной проверкой общего лимита уникальных адресов.
+finish(Specs) ->
+    Limit = max_hosts(),
+    case union_specs(Specs, [], Limit) of
+        {ok, Intervals} ->
+            {ok, [int_to_addr_range(Interval) || Interval <- Intervals]};
+        {error, Reason} ->
+            {error, Reason}
     end.
+
+int_to_addr_range({First, Last}) ->
+    {int_to_ip(First), int_to_ip(Last)}.
+
+-spec union_specs([target_spec()], [int_range()], non_neg_integer()) ->
+          {ok, [int_range()]} | {error, too_many_hosts}.
+union_specs([], Acc, _Limit) ->
+    {ok, Acc};
+union_specs([Spec | Rest], Acc, Limit) ->
+    case spec_intervals(Spec, Limit) of
+        {ok, Intervals} ->
+            {Merged, Count} = merge_intervals(Intervals, Acc),
+            case Count > Limit of
+                true -> {error, too_many_hosts};
+                false -> union_specs(Rest, Merged, Limit)
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+%% Интервалы одной цели. Размер пооктетного произведения проверяется
+%% до разворачивания, поэтому чрезмерная цель не материализуется.
+-spec spec_intervals(target_spec(), non_neg_integer()) ->
+          {ok, [int_range()]} | {error, too_many_hosts}.
+spec_intervals({range, Range}, _Limit) ->
+    {ok, [Range]};
+spec_intervals({octets, Octets}, Limit) ->
+    case product_size(Octets) > Limit of
+        true -> {error, too_many_hosts};
+        false -> {ok, product_intervals(Octets)}
+    end.
+
+product_size({U1, U2, U3, U4}) ->
+    union_size(U1) * union_size(U2) * union_size(U3) * union_size(U4).
+
+union_size(Union) ->
+    lists:sum([Last - First + 1 || {First, Last} <- Union]).
+
+%% Линейное слияние пакета отсортированных интервалов одной цели с
+%% накопленным отсортированным списком. Оба списка упорядочены по
+%% первой границе, поэтому слияние и нормализация выполняется за один
+%% проход по обоим спискам, а число уникальных адресов считается по
+%% итоговым несмежным интервалам без материализации отдельных адресов.
+%% Это заменяет прежнюю вставку по одному интервалу, которая копировала
+%% префикс накопленного списка и была квадратичной по числу интервалов.
+-spec merge_intervals([int_range()], [int_range()]) ->
+          {[int_range()], non_neg_integer()}.
+merge_intervals(Intervals, Acc) ->
+    normalize_intervals(lists:merge(Intervals, Acc), undefined, 0, []).
+
+normalize_intervals([], undefined, Count, Acc) ->
+    {lists:reverse(Acc), Count};
+normalize_intervals([], {Start, End}, Count, Acc) ->
+    {lists:reverse([{Start, End} | Acc]), Count + End - Start + 1};
+normalize_intervals([{First, Last} | Rest], undefined, Count, Acc) ->
+    normalize_intervals(Rest, {First, Last}, Count, Acc);
+normalize_intervals([{First, Last} | Rest], {Start, End}, Count, Acc)
+  when First =< End + 1 ->
+    normalize_intervals(Rest, {Start, max(End, Last)}, Count, Acc);
+normalize_intervals([{First, Last} | Rest], {Start, End}, Count, Acc) ->
+    normalize_intervals(Rest, {First, Last}, Count + End - Start + 1,
+                        [{Start, End} | Acc]).
 
 max_hosts() ->
     case application:get_env(trawler, max_hosts, ?DEFAULT_MAX_HOSTS) of

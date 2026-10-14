@@ -161,9 +161,14 @@ trim_whitespace_test() ->
                  trawler_targets:parse_targets(<<"  192.0.2.1  ">>)),
     ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 2}}]},
                  trawler_targets:parse_targets(<<" 192.0.2.1 , 192.0.2.2 ">>)),
-    %% Пробелы внутри элемента не допускаются.
-    ?assertEqual({error, {invalid_targets, <<"192.0.2.5 / 30">>}},
-                 trawler_targets:parse_targets(<<"  192.0.2.5 / 30  ">>)).
+    %% Пробел внутри одного выражения больше не часть старого элемента:
+    %% ввод делится на фрагменты, и в причину ошибки попадает первый
+    %% неразобранный фрагмент.
+    ?assertEqual({error, {invalid_targets, <<"/">>}},
+                 trawler_targets:parse_targets(<<"  192.0.2.5 / 30  ">>)),
+    %% Пробел разделяет две обычные цели.
+    ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 2}}]},
+                 trawler_targets:parse_targets(<<"192.0.2.1 192.0.2.2">>)).
 
 trim_whitespace_in_list_test() ->
     ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 1}}]},
@@ -215,9 +220,7 @@ invalid_octet_test() ->
     ?assertEqual({error, {invalid_targets, <<"192.0.2.300">>}},
                  trawler_targets:parse_targets(<<"192.0.2.300">>)),
     ?assertEqual({error, {invalid_targets, <<"256.0.0.1">>}},
-                 trawler_targets:parse_targets(<<"256.0.0.1">>)),
-    ?assertEqual({error, {invalid_targets, <<"192.0.2.-1">>}},
-                 trawler_targets:parse_targets(<<"192.0.2.-1">>)).
+                 trawler_targets:parse_targets(<<"256.0.0.1">>)).
 
 leading_zero_octet_test() ->
     ?assertEqual({error, {invalid_targets, <<"192.0.2.01">>}},
@@ -266,10 +269,11 @@ invalid_cidr_test() ->
 reversed_range_test() ->
     ?assertEqual({error, {invalid_targets, <<"192.0.2.10-192.0.2.1">>}},
                  trawler_targets:parse_targets(<<"192.0.2.10-192.0.2.1">>)),
-    ?assertEqual({error, {invalid_targets, <<"192.0.2.1-">>}},
-                 trawler_targets:parse_targets(<<"192.0.2.1-">>)),
-    ?assertEqual({error, {invalid_targets, <<"-192.0.2.1">>}},
-                 trawler_targets:parse_targets(<<"-192.0.2.1">>)).
+    %% Двойной дефис и обратный диапазон внутри октета остаются ошибками.
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.1-3-4">>}},
+                 trawler_targets:parse_targets(<<"192.0.2.1-3-4">>)),
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.5-3">>}},
+                 trawler_targets:parse_targets(<<"192.0.2.5-3">>)).
 
 %%% ------------------------------------------------------------------
 %%% Лимит числа хостов
@@ -311,6 +315,233 @@ too_many_hosts_counts_merged_test() ->
                            trawler_targets:parse_targets(
                              <<"192.0.2.1-192.0.2.11,192.0.2.5">>))
       end).
+
+%%% ------------------------------------------------------------------
+%%% Пооктетные выражения
+%%% ------------------------------------------------------------------
+
+octet_ranges_in_all_four_octets_test() ->
+    %% Точное декартово произведение сверяется с независимым эталоном.
+    assert_octets(<<"10-11.20-21.30-31.40-41">>,
+                  [{10, 11}, {20, 21}, {30, 31}, {40, 41}]).
+
+octet_lists_and_ranges_test() ->
+    assert_octets(<<"192.168.3-5,7.1,3-4">>,
+                  [192, 168, [3, 4, 5, 7], [1, 3, 4]]).
+
+octet_lists_with_adjacent_suffix_test() ->
+    assert_octets(<<"192.0.2.1,5,9">>, [192, 0, 2, [1, 5, 9]]),
+    assert_octets(<<"255.0.0.250-255">>, [255, 0, 0, {250, 255}]).
+
+octet_repeated_values_test() ->
+    %% Повторы внутри октета объединяются: остаются значения 1..4.
+    ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 4}}]},
+                 trawler_targets:parse_targets(<<"192.0.2.1,1,1-3,2-4">>)).
+
+octet_open_bounds_test() ->
+    ?assertEqual({ok, [{{192, 0, 2, 10}, {192, 0, 2, 255}}]},
+                 trawler_targets:parse_targets(<<"192.0.2.10-">>)),
+    ?assertEqual({ok, [{{192, 0, 2, 0}, {192, 0, 2, 20}}]},
+                 trawler_targets:parse_targets(<<"192.0.2.-20">>)),
+    ?assertEqual({ok, [{{192, 0, 2, 0}, {192, 0, 2, 255}}]},
+                 trawler_targets:parse_targets(<<"192.0.2.-">>)),
+    %% Ранее ошибочная запись становится диапазоном последнего октета 0..1.
+    assert_octets(<<"192.0.2.-1">>, [192, 0, 2, {0, 1}]).
+
+octet_open_bounds_in_each_octet_test() ->
+    %% Пропущенная граница допустима в любом октете.
+    assert_octets(<<"-2.0.2.1">>, [{0, 2}, 0, 2, 1]),
+    assert_octets(<<"2-.0.2.1">>, [{2, 255}, 0, 2, 1]),
+    assert_octets(<<"1.-1.2.3">>, [1, {0, 1}, 2, 3]),
+    assert_octets(<<"1.2.-3.4">>, [1, 2, {0, 3}, 4]),
+    assert_octets(<<"1.2.3.4-">>, [1, 2, 3, {4, 255}]),
+    assert_octets(<<"1.2.3.-">>, [1, 2, 3, {0, 255}]).
+
+octet_boundary_values_test() ->
+    assert_octets(<<"0.0.0.0">>, [0, 0, 0, 0]),
+    assert_octets(<<"255.255.255.255">>, [255, 255, 255, 255]),
+    assert_octets(<<"0-255.0.0.-">>, [{0, 255}, 0, 0, {0, 255}]).
+
+octet_merges_with_legacy_targets_test() ->
+    ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 3}}]},
+                 trawler_targets:parse_targets(
+                   <<"192.0.2.1-3 192.0.2.3/32">>)),
+    ?assertEqual({ok, [{{192, 0, 2, 0}, {192, 0, 2, 4}}]},
+                 trawler_targets:parse_targets(
+                   <<"192.0.2.0/30 192.0.2.3-4">>)).
+
+%%% ------------------------------------------------------------------
+%%% Пооктетные цели в списках и смешанный бинарный ввод
+%%% ------------------------------------------------------------------
+
+octet_in_erlang_list_test() ->
+    %% Каждый бинарный элемент списка — одна цель, теперь и пооктетная.
+    ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 3}}]},
+                 trawler_targets:parse_targets([<<"192.0.2.1-3">>,
+                                                {192, 0, 2, 2}])),
+    ?assertEqual({ok, [{{10, 0, 0, 1}, {10, 0, 0, 1}},
+                       {{10, 0, 0, 4}, {10, 0, 0, 6}}]},
+                 trawler_targets:parse_targets([<<"10.0.0.1">>,
+                                                <<"10.0.0.4-6">>])),
+    %% Обрезка пробелов вокруг элемента списка сохраняется.
+    ?assertEqual({ok, [{{10, 0, 0, 2}, {10, 0, 0, 3}}]},
+                 trawler_targets:parse_targets([<<"  10.0.0.2-3  ">>])).
+
+legacy_spaced_list_test() ->
+    ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 1}},
+                       {{192, 0, 2, 4}, {192, 0, 2, 7}},
+                       {{192, 0, 2, 10}, {192, 0, 2, 11}}]},
+                 trawler_targets:parse_targets(
+                   <<" 192.0.2.1 , 192.0.2.4/30 , 192.0.2.10-192.0.2.11 ">>)).
+
+mixed_fragments_test() ->
+    Expected = {ok, [{{192, 0, 2, 1}, {192, 0, 2, 1}},
+                     {{192, 0, 2, 3}, {192, 0, 2, 4}},
+                     {{198, 51, 100, 0}, {198, 51, 100, 3}},
+                     {{198, 51, 100, 7}, {198, 51, 100, 7}}]},
+    ?assertEqual(Expected,
+                 trawler_targets:parse_targets(
+                   <<"192.0.2.1,3-4 198.51.100.0/30,198.51.100.7">>)),
+    ?assertEqual(Expected,
+                 trawler_targets:parse_targets(
+                   <<"192.0.2.1,3-4\t198.51.100.0/30,198.51.100.7">>)),
+    ?assertEqual(Expected,
+                 trawler_targets:parse_targets(
+                   <<"192.0.2.1,3-4\n198.51.100.0/30,198.51.100.7">>)),
+    ?assertEqual(Expected,
+                 trawler_targets:parse_targets(
+                   <<"192.0.2.1,3-4\r\n198.51.100.0/30,198.51.100.7">>)),
+    %% Пробел разделяет две обычные цели без запятой.
+    ?assertEqual({ok, [{{10, 0, 0, 1}, {10, 0, 0, 1}},
+                       {{10, 0, 0, 9}, {10, 0, 0, 9}}]},
+                 trawler_targets:parse_targets(<<"10.0.0.1 10.0.0.9">>)).
+
+%%% ------------------------------------------------------------------
+%%% Ошибочные пооктетные цели и разделение
+%%% ------------------------------------------------------------------
+
+invalid_octet_target_test() ->
+    %% CIDR сочетается только с обычным одиночным адресом.
+    ?assertEqual({error, {invalid_targets, <<"10-11.20.30.40/24">>}},
+                 trawler_targets:parse_targets(<<"10-11.20.30.40/24">>)),
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.1-3/24">>}},
+                 trawler_targets:parse_targets(<<"192.0.2.1-3/24">>)),
+    %% Фрагмент с запятой не разбирается ни старым списком, ни октетами;
+    %% причина — первый неразобранный элемент старого разбора.
+    ?assertEqual({error, {invalid_targets, <<"3/24">>}},
+                 trawler_targets:parse_targets(<<"192.0.2.1,3/24">>)),
+    %% Значение, ведущие нули, пустой октет и пустой элемент.
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.256">>}},
+                 trawler_targets:parse_targets(<<"192.0.2.256">>)),
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.01">>}},
+                 trawler_targets:parse_targets(<<"192.0.2.01">>)),
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.">>}},
+                 trawler_targets:parse_targets(<<"192.0.2.">>)),
+    %% Пустой элемент через запятую сохраняет прежнюю причину.
+    ?assertEqual({error, {invalid_targets, <<>>}},
+                 trawler_targets:parse_targets(<<"192.0.2.1,,">>)),
+    %% Пробел внутри выражения остаётся ошибкой.
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.">>}},
+                 trawler_targets:parse_targets(<<"192.0.2. 1">>)).
+
+invalid_targets_in_erlang_list_test() ->
+    ?assertEqual({error, {invalid_targets, <<"10-11.20.30.40/24">>}},
+                 trawler_targets:parse_targets([<<"10-11.20.30.40/24">>])),
+    ?assertEqual({error, {invalid_targets, <<"192.0.2.256">>}},
+                 trawler_targets:parse_targets([<<"192.0.2.256">>])).
+
+%%% ------------------------------------------------------------------
+%%% Лимит пооктетного произведения
+%%% ------------------------------------------------------------------
+
+octet_huge_product_test() ->
+    %% Огромное произведение отклоняется без разворачивания пространства.
+    ?assertEqual({error, too_many_hosts},
+                 trawler_targets:parse_targets(<<"-.-.-.-">>)),
+    with_max_hosts(65536,
+      fun() ->
+              ?assertEqual({error, too_many_hosts},
+                           trawler_targets:parse_targets(<<"-.-.-.-">>))
+      end),
+    with_max_hosts(4,
+      fun() ->
+              ?assertEqual({error, too_many_hosts},
+                           trawler_targets:parse_targets(<<"-.-.-.-">>)),
+              %% Цель сверх лимита отклоняется независимо от соседних целей.
+              ?assertEqual({error, too_many_hosts},
+                           trawler_targets:parse_targets(
+                             <<"192.0.2.1 -.-.-.-">>))
+      end).
+
+octet_product_at_limit_test() ->
+    with_max_hosts(256,
+      fun() ->
+              ?assertEqual({ok, [{{0, 0, 0, 0}, {0, 0, 0, 255}}]},
+                           trawler_targets:parse_targets(<<"0.0.0.-">>))
+      end),
+    with_max_hosts(255,
+      fun() ->
+              ?assertEqual({error, too_many_hosts},
+                           trawler_targets:parse_targets(<<"0.0.0.-">>))
+      end).
+
+octet_intersections_at_limit_test() ->
+    with_max_hosts(4,
+      fun() ->
+              %% Пересечение и повторы считаются по объединению, а не сумме.
+              ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 4}}]},
+                           trawler_targets:parse_targets(
+                             <<"192.0.2.1-4 192.0.2.2-3">>)),
+              ?assertEqual({ok, [{{192, 0, 2, 1}, {192, 0, 2, 4}}]},
+                           trawler_targets:parse_targets(
+                             <<"192.0.2.1-4 192.0.2.2,3,4">>)),
+              ?assertEqual({error, too_many_hosts},
+                           trawler_targets:parse_targets(
+                             <<"192.0.2.1-4 192.0.2.2-3 192.0.2.5">>)),
+              ?assertEqual({error, too_many_hosts},
+                           trawler_targets:parse_targets(
+                             <<"192.0.2.1-4 192.0.2.2,3,4,5">>)),
+              %% Ошибочный синтаксис обнаруживается независимо от порядка.
+              ?assertEqual({error, {invalid_targets, <<"192.0.2.300">>}},
+                           trawler_targets:parse_targets(
+                             <<"-.-.-.- 192.0.2.300">>)),
+              ?assertEqual({error, {invalid_targets, <<"192.0.2.300">>}},
+                           trawler_targets:parse_targets(
+                             <<"192.0.2.300 -.-.-.-">>))
+      end).
+
+%%% ------------------------------------------------------------------
+%%% Слияние больших и пересекающихся разреженных целей
+%%% ------------------------------------------------------------------
+
+%% Большое разреженное произведение: 65536 одиночных интервалов. Прежняя
+%% вставка по одному интервалу копировала префикс накопленного списка и
+%% была квадратичной по числу интервалов. Бюджет по reductions (плюс
+%% таймаут теста) ловит возврат к такой вставке, а независимое
+%% перечисление подтверждает, что выбраны все точные адреса.
+big_sparse_product_65536_test_() ->
+    {timeout, 60, fun big_sparse_product_65536/0}.
+
+big_sparse_product_65536() ->
+    {_, Before} = erlang:process_info(self(), reductions),
+    {ok, Ranges} = trawler_targets:parse_targets(<<"-.-.0.1">>),
+    {_, After} = erlang:process_info(self(), reductions),
+    Expected = [{A, B, 0, 1}
+                || A <- lists:seq(0, 255), B <- lists:seq(0, 255)],
+    ?assertEqual(Expected, expand_ranges(Ranges)),
+    ?assertEqual(65536, length(Ranges)),
+    ?assertEqual(65536, trawler_targets:count_hosts(Ranges)),
+    %% Линейное слияние укладывается в миллионы reductions; квадратичный
+    %% путь потратил бы порядка 2*10^9.
+    ?assert(After - Before < 100000000).
+
+%% Пересечение двух разреженных выражений с мостящими диапазонами:
+%% диапазон 0.0.0.1-3 мостит точки 0.0.0.0, 0.0.0.2 и 0.0.0.4 первого
+%% выражения, а адрес 0.0.0.2 входит в оба выражения. Ожидаемый набор
+%% строится независимым перечислением обоих произведений.
+octet_sparse_overlap_bridging_test() ->
+    assert_octet_union(<<"0-1.0.0.0,2,4 0.0.0.1-3">>,
+                       [[{0, 1}, 0, 0, [0, 2, 4]], [0, 0, 0, {1, 3}]]).
 
 %%% ------------------------------------------------------------------
 %%% Порты
@@ -420,6 +651,46 @@ count_empty_test() ->
 expand_ports(Ranges) ->
     lists:append([[First | lists:seq(First + 1, Last)]
                   || {First, Last} <- Ranges]).
+
+%% Точная выборка сверяется с независимым эталонным перечислением
+%% маленького произведения: наборы значений каждого октета перебираются
+%% напрямую, без обращения к логике парсера.
+assert_octets(Target, OctetValues) ->
+    {ok, Ranges} = trawler_targets:parse_targets(Target),
+    Expected = octet_product(OctetValues),
+    ?assertEqual(Expected, expand_ranges(Ranges)),
+    ?assertEqual(length(Expected), trawler_targets:count_hosts(Ranges)).
+
+%% Объединение нескольких пооктетных выражений сверяется с независимым
+%% перечислением: наборы каждого выражения перебираются напрямую, затем
+%% объединяются без повторов.
+assert_octet_union(Input, OctetSpecs) ->
+    {ok, Ranges} = trawler_targets:parse_targets(Input),
+    Expected = lists:usort(
+                 lists:append([octet_product(Spec) || Spec <- OctetSpecs])),
+    ?assertEqual(Expected, expand_ranges(Ranges)),
+    ?assertEqual(length(Expected), trawler_targets:count_hosts(Ranges)).
+
+octet_product([V1, V2, V3, V4]) ->
+    lists:sort([{A, B, C, D}
+                || A <- octet_values(V1), B <- octet_values(V2),
+                   C <- octet_values(V3), D <- octet_values(V4)]).
+
+octet_values(Value) when is_integer(Value) ->
+    [Value];
+octet_values({First, Last}) ->
+    lists:seq(First, Last);
+octet_values(Values) when is_list(Values) ->
+    lists:usort(Values).
+
+%% Разворачивание нормализованных диапазонов в возрастающий список
+%% адресов; повторы в результате сравнения не скрываются.
+expand_ranges(Ranges) ->
+    lists:append(
+      [[trawler_targets:int_to_ip(Int)
+        || Int <- lists:seq(trawler_targets:ip_to_int(First),
+                            trawler_targets:ip_to_int(Last))]
+       || {First, Last} <- Ranges]).
 
 with_max_hosts(Limit, Fun) ->
     Previous = application:get_env(trawler, max_hosts),
