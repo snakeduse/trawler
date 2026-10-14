@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# check-discovery-raw — opt-in runner настоящих raw-проб на loopback.
+#
+# Задача 2.3 изменения add-ipv4-host-discovery. В make check не входит:
+# raw-пробам нужны сетевые привилегии. Библиотечное ядро root не требует,
+# привилегии нужны только этой диагностике.
+#
+# Обёртка подключает OTP 27 через scripts/env.sh, проверяет сборку и при
+# необходимости перезапускает полезную нагрузку (escript
+# check-discovery-raw.escript) через `sudo -n`, сохраняя HOME/PATH, чтобы
+# окружение Kerl нашлось и под root.
+#
+# Запуск:
+#   scripts/check-discovery-raw
+#   # или вручную:
+#   source scripts/env.sh otp
+#   sudo -n env "HOME=$HOME" "PATH=$PATH" \
+#       escript scripts/check-discovery-raw.escript
+#
+# Код возврата: 0 — проверки пройдены; 1 — провал; 2 — нет прав/сборки.
+
+set -euo pipefail
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/env.sh
+source "${here}/env.sh" otp
+
+root="${TRAWLER_ROOT}"
+payload="${here}/check-discovery-raw.escript"
+
+if [[ ! -d "${root}/_build/default/lib/trawler/ebin" ]]; then
+    echo "check-discovery-raw: нет сборки. Сначала выполните make build." >&2
+    exit 2
+fi
+
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "check-discovery-raw: raw-пробам нужны сетевые привилегии; повтор через sudo -n." >&2
+    exec sudo -n env "HOME=${HOME}" "PATH=${PATH}" "TRAWLER_ROOT=${root}" \
+        "TRAWLER_OTP_ROOT=${TRAWLER_OTP_ROOT:-}" \
+        escript "${payload}" "$@"
+fi
+
+exec escript "${payload}" "$@"

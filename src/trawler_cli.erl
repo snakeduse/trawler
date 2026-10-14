@@ -39,6 +39,8 @@ main(["--version"]) ->
     version();
 main(["scan" | Args]) ->
     scan(Args);
+main(["discover" | Args]) ->
+    erlang:halt(trawler_discovery_cli:run(Args));
 main(_Args) ->
     unsupported().
 
@@ -52,9 +54,11 @@ help() ->
         "Trawler - встраиваемый сканер сети на Erlang/OTP\n\n"
         "Использование:\n"
         "  trawler [--help | -h | --version]\n"
-        "  trawler scan --targets <TARGETS> [--ports <PORTS>] [опции]\n\n"
+        "  trawler scan --targets <TARGETS> [--ports <PORTS>] [опции]\n"
+        "  trawler discover --targets <TARGETS> [--method <METHOD>] [опции]\n\n"
         "Команды:\n"
-        "  scan                  Просканировать адреса и порты по TCP\n\n"
+        "  scan                  Просканировать адреса и порты по TCP\n"
+        "  discover              Найти отвечающие хосты методами ARP/ICMP/TCP\n\n"
         "Параметры scan:\n"
         "  --targets <TARGETS>   Обязательно. Адреса IPv4, сети и\n"
         "                        пооктетные выражения. Старый список целей\n"
@@ -82,6 +86,17 @@ help() ->
         "  одна обновляемая строка в терминале и редкие строки без ANSI\n"
         "  при перенаправлении. Таймаут относится к одной пробе и не\n"
         "  означает отсутствие компьютера.\n\n"
+        "Параметры discover:\n"
+        "  --method <METHOD>     auto|arp|icmp|tcp|raw_tcp (по умолчанию auto).\n"
+        "                        raw-методы (arp, icmp, raw_tcp) требуют Linux\n"
+        "                        и сетевых прав; без них auto переходит на TCP\n"
+        "                        connect 80/443 и сообщает об этом в stderr.\n"
+        "  --ports <PORTS>       Только с --method tcp. По умолчанию 80/443.\n"
+        "  --retries <N>         Повторов каждой пробы, 0..5\n"
+        "Поведение discover:\n"
+        "  подтверждённые адреса печатаются сразу как IP, метод и MAC;\n"
+        "  отсутствие ответа не означает отсутствие компьютера. Бюджет\n"
+        "  --timeout относится ко всему адресу, включая поиск маршрута.\n\n"
         "Общие параметры:\n"
         "  -h, --help            Показать эту справку\n"
         "  --version             Показать версию приложения\n\n"

@@ -165,6 +165,112 @@ _build/default/bin/trawler scan --targets 127.0.0.1 --ports 22,80 --json
 результаты — в stdout. Таймаут относится к одной пробе и не означает отсутствия
 компьютера.
 
+## Обнаружение хостов (discover)
+
+`discover` ищет отвечающие IPv4-адреса, а не открытые порты всех хостов:
+
+```bash
+source scripts/env.sh otp
+_build/default/bin/trawler discover \
+  --targets '127.0.0.1,192.0.2.0/30' --method auto
+```
+
+С `--method auto` метод выбирается по маршруту ядра для каждого адреса: ARP —
+только для непосредственно подключённого Ethernet-сегмента, ICMP echo/timestamp
+и raw TCP SYN 443/ACK 80 — для остальных; собственный адрес подтверждается
+локально. Без raw-привилегий auto явно сообщает о переходе на TCP connect
+80/443 (предупреждение в stderr), а явно выбранный raw-метод (`arp`, `icmp`,
+`raw_tcp`) завершается ошибкой до проб.
+
+Текстовый режим печатает подтверждённые адреса сразу: `IP`, метод (`local`,
+`arp`, `icmp_echo`, `icmp_timestamp`, `tcp_syn`, `tcp_ack`, `tcp_open`,
+`tcp_refused`) и MAC при ARP. `--verbose` добавляет состояние каждого адреса
+(`up`, `no_response`, `error`). Итоговая сводка сообщает число уникальных
+адресов, находок, отсутствие ответа и ошибки и никогда не объявляет машину
+отсутствующей:
+
+```
+IP               МЕТОД        MAC
+127.0.0.1        tcp_open     -
+Завершено: 1 из 1 адресов за 4 мс
+Найдено отвечающих адресов: 1
+Без ответа: 0
+Ошибки: 0
+```
+
+Параметры: `--method auto|arp|icmp|tcp|raw_tcp` (по умолчанию auto), `--ports`
+(только с `--method tcp`; по умолчанию 80/443, не более 16 портов), `--timeout
+<мс>` (конечный бюджет всего адреса, включая поиск маршрута, по умолчанию 1000),
+`--concurrency <n>` (по умолчанию 64), `--retries <0..5>` (по умолчанию 2) и
+флаги `--json`, `--verbose`, `--no-progress`. Повтор любого ключа или флага,
+неизвестный ключ и пропущенное значение отклоняются с кодом 2. Коды выхода: 0 —
+поиск завершён (включая отсутствие находок и ошибки отдельных адресов), 1 —
+недоступный метод, ошибка запуска или выполнения, 2 — неверные аргументы.
+Прогресс и предупреждения идут в stderr, находки и JSON — в stdout.
+
+С `--json` печатается один полный объект с отсортированными `results` и
+`summary`, где `warnings` — список строк; прогресса нет, а предупреждение о TCP
+fallback по-прежнему уходит в stderr.
+
+### Привилегии и ограничения raw
+
+- Raw-методы (`arp`, `icmp`, `raw_tcp`) работают только на Linux и требуют
+  сетевых привилегий (`CAP_NET_RAW` или root). TCP connect доступен без root.
+- Trawler не меняет системные capabilities и firewall автоматически: никакого
+  `setcap` при установке не выполняется. Привилегии выдаются явно на запуск.
+- Одновременно на адрес держится одна активная проба; поздний ответ на закрытую
+  пробу теряется (осознанный размен первой версии), а потерянные пробы
+  повторяются в пределах `--timeout`.
+- `--timeout` — жёсткий бюджет адреса, а не отдельного пакета: он покрывает и
+  поиск маршрута, и все виды проб адреса.
+- Raw TCP использует фиксированные порты SYN 443 и ACK 80; `--ports` к raw не
+  применяется.
+- Proxy ARP отвечает за адрес, а не за отдельное устройство: одинаковый MAC у
+  разных адресов — не ошибка.
+- `discover` не обещает точного совпадения с результатами Nmap и не различает
+  все эвристики Nmap; молчащий хост не объявляется отсутствующим.
+
+Реальную проверку raw-проб на loopback (ICMP echo/timestamp, raw SYN/ACK) можно
+выполнить явной opt-in командой. В `make check` она не входит: нужны сетевые
+права, а библиотечное ядро root не требует. Абсолютный путь к escript нужен,
+чтобы после `sudo` нашлись OTP 27 и сборка:
+
+```bash
+source scripts/env.sh otp
+sudo -n env "HOME=$HOME" "PATH=$PATH" "TRAWLER_ROOT=$PWD" \
+  escript "$PWD/scripts/check-discovery-raw.escript"
+# или обёрткой: она подключит OTP и при необходимости перезапустит через sudo -n.
+scripts/check-discovery-raw
+```
+
+### Erlang API обнаружения
+
+```erlang
+{ok, _} = application:ensure_all_started(trawler),
+{ok, Results, Summary} =
+    trawler:discover(<<"127.0.0.1">>, #{method => tcp, ports => [80, 443]}),
+%% `:=` допустим только в образце, поэтому отбор по адресу идёт
+%% генератором, а шаблон понимания списка лишь выбирает поля.
+[{State, Method}
+ || #{ip := {127, 0, 0, 1}, state := State, method := Method} <- Results].
+
+{ok, Ref} = trawler:start_discovery(<<"192.0.2.0/30">>,
+                                    #{method => auto, recipient => self()}),
+receive {trawler_discovery, Ref, {result, AsyncResult}} -> ok end, %% находки
+receive {trawler_discovery, Ref, {done, AsyncSummary}} -> ok end,
+{ok, Status} = trawler:discovery_status(Ref),
+%% Пока задание активно, отмена возвращает ok; для уже завершённого —
+%% {error, already_finished}.
+Cancel = trawler:cancel_discovery(Ref).
+```
+
+Каждый уникальный адрес даёт ровно один результат `up | no_response | error` с
+`elapsed_ms`; у `up` есть `method`, у ARP — `mac`, у TCP — `port`. `no_response`
+не означает отсутствия компьютера. Порты допустимы только для `method => tcp`
+(атом `default` даёт 1000 портов и отклоняется как `too_many_ports`). Опции:
+`method`, `ports`, `timeout_ms`, `concurrency`, `retries`, `deadline_ms`,
+`recipient`.
+
 ## Подключение к другому Erlang-приложению
 
 После публикации изменений в Git добавьте зависимость в `rebar.config`, заменив
@@ -184,7 +290,7 @@ _build/default/bin/trawler scan --targets 127.0.0.1 --ports 22,80 --json
 
 %% Синхронно: результаты отсортированы по адресу и порту.
 {ok, Results} = trawler:scan(<<"127.0.0.1">>, <<"22,80,443">>, #{}),
-[#{ip := {127, 0, 0, 1}, port := Port, state := State} || _ <- Results].
+[{Port, State} || #{ip := {127, 0, 0, 1}, port := Port, state := State} <- Results].
 
 %% Порты можно опустить: атом default выбирает 1000 наиболее популярных портов.
 {ok, DefaultResults} = trawler:scan(<<"127.0.0.1">>, default, #{}),

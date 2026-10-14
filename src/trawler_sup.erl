@@ -1,9 +1,9 @@
 %%%-------------------------------------------------------------------
 %%% @doc Корневой supervisor приложения trawler.
 %%%
-%%% Запускает глобальный планировщик проб, реестр сканирований и
-%%% динамический supervisor координаторов. Порядок детей задаёт
-%%% порядок запуска: планировщик и реестр доступны до появления
+%%% Запускает глобальный планировщик проб, реестры сканирования и
+%%% обнаружения и динамические supervisor'ы координаторов. Порядок детей
+%%% задаёт порядок запуска: планировщик и реестры доступны до появления
 %%% координаторов.
 %%% @end
 %%%-------------------------------------------------------------------
@@ -39,5 +39,17 @@ init([]) ->
            restart => permanent,
            shutdown => infinity,
            type => supervisor,
-           modules => [trawler_scan_sup]}],
+           modules => [trawler_scan_sup]},
+         #{id => trawler_discovery_registry,
+           start => {trawler_discovery_registry, start_link, []},
+           restart => permanent,
+           shutdown => 5000,
+           type => worker,
+           modules => [trawler_discovery_registry]},
+         #{id => trawler_discovery_sup,
+           start => {trawler_discovery_sup, start_link, []},
+           restart => permanent,
+           shutdown => infinity,
+           type => supervisor,
+           modules => [trawler_discovery_sup]}],
     {ok, {Flags, Children}}.

@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%% @doc Публичный Erlang API TCP-сканера IPv4.
+%% @doc Публичный Erlang API TCP-сканера и обнаружения хостов IPv4.
 %%
 %% Одно ядро сканирования обслуживает Erlang-приложения и CLI.
 %% Асинхронный API {@link start_scan/3} отправляет результаты
@@ -25,23 +25,59 @@
 %% end.
 %% '''
 %%
+%% Обнаружение хостов IPv4 делегирует {@link trawler_discovery}:
+%% {@link start_discovery/2}, {@link discover/2},
+%% {@link discovery_status/1} и {@link cancel_discovery/1}.
+%%
+%% Пример синхронного обнаружения на loopback:
+%% ```
+%% {ok, _} = application:ensure_all_started(trawler),
+%% {ok, Results, Summary} =
+%%     trawler:discover(<<"127.0.0.1">>, #{method => tcp, ports => [80, 443]}),
+%% {maps:get(counters, Summary), [maps:get(ip, R) || R <- Results]}.
+%% '''
+%%
+%% Пример асинхронного обнаружения:
+%% ```
+%% {ok, Ref} = trawler:start_discovery(<<"127.0.0.1">>,
+%%                                     #{method => auto, recipient => self()}),
+%% receive
+%%     {trawler_discovery, Ref, {result, Result}} -> Result;
+%%     {trawler_discovery, Ref, {done, Summary}} -> Summary
+%% end.
+%% '''
+%%
 %% Для всех функций OTP-приложение должно быть запущено; иначе
-%% возвращается `{error, not_started}'. Ссылки сканирования —
-%% непрозрачные `reference()', действующие только в текущей
-%% виртуальной машине. Запрос полностью проверяется до любых
+%% возвращается `{error, not_started}'. Ссылки сканирования и
+%% обнаружения — непрозрачные `reference()', действующие только в
+%% текущей виртуальной машине. Запрос полностью проверяется до любых
 %% сетевых операций.
 %% @end
 %%%-------------------------------------------------------------------
 -module(trawler).
 
--export([start_scan/3, scan/3, status/1, cancel/1]).
+-export([start_scan/3, scan/3, status/1, cancel/1,
+         start_discovery/2, discover/2, discovery_status/1,
+         cancel_discovery/1]).
 
 -export_type([scan_ref/0, options/0, result/0, status/0, summary/0,
-              result_state/0, scan_state/0]).
+              result_state/0, scan_state/0,
+              discovery_ref/0, discovery_result/0, discovery_status/0,
+              discovery_summary/0, discovery_method/0,
+              discovery_result_state/0, discovery_state/0]).
 
 -type scan_ref() :: reference().
 -type result_state() :: open | closed | timeout | unreachable | error.
 -type scan_state() :: queued | running | completed | cancelled | failed.
+
+%% Типы обнаружения IPv4-хостов (см. {@link trawler_discovery}).
+-type discovery_ref() :: trawler_discovery:discovery_ref().
+-type discovery_method() :: trawler_discovery:method().
+-type discovery_result() :: trawler_discovery:result().
+-type discovery_status() :: trawler_discovery:status().
+-type discovery_summary() :: trawler_discovery:summary().
+-type discovery_result_state() :: trawler_discovery:result_state().
+-type discovery_state() :: trawler_discovery:state_name().
 
 -type ip4() :: {0..255, 0..255, 0..255, 0..255}.
 
@@ -173,6 +209,47 @@ cancel(Ref) ->
         {error, not_found} ->
             {error, not_found}
     end.
+
+%%% ------------------------------------------------------------------
+%%% Обнаружение IPv4-хостов
+%%% ------------------------------------------------------------------
+
+%% @doc Запускает асинхронное обнаружение IPv4-хостов.
+%%
+%% Делегирует {@link trawler_discovery:start/2}. События
+%% `{trawler_discovery, Ref, Event}' получает процесс из опции
+%% `recipient' (по умолчанию вызывающий). При остановленном приложении
+%% возвращается `{error, not_started}'.
+-spec start_discovery(trawler_targets:targets_input(),
+                      trawler_discovery:options()) ->
+          {ok, discovery_ref()} | {error, term()}.
+start_discovery(Targets, Options) ->
+    trawler_discovery:start(Targets, Options).
+
+%% @doc Выполняет обнаружение и возвращает сортированные результаты и сводку.
+%%
+%% Делегирует {@link trawler_discovery:run/2}.
+-spec discover(trawler_targets:targets_input(),
+              trawler_discovery:options()) ->
+          {ok, [discovery_result()], discovery_summary()} | {error, term()}.
+discover(Targets, Options) ->
+    trawler_discovery:run(Targets, Options).
+
+%% @doc Возвращает состояние и счётчики обнаружения.
+%%
+%% Делегирует {@link trawler_discovery:status/1}.
+-spec discovery_status(discovery_ref()) ->
+          {ok, discovery_status()} | {error, not_found}.
+discovery_status(Ref) ->
+    trawler_discovery:status(Ref).
+
+%% @doc Отменяет активное обнаружение.
+%%
+%% Делегирует {@link trawler_discovery:cancel/1}.
+-spec cancel_discovery(discovery_ref()) ->
+          ok | {error, not_found | already_finished}.
+cancel_discovery(Ref) ->
+    trawler_discovery:cancel(Ref).
 
 %%% ------------------------------------------------------------------
 %%% Внутренние функции
