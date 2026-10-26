@@ -10,12 +10,22 @@
 %%%
 %%% Текстовый режим работает через асинхронный API и печатает
 %%% подтверждённые адреса по мере получения (`IP METHOD MAC', MAC — при
-%%% наличии); остальные исходы видны только с `--verbose'. Прогресс идёт
-%%% в stderr: одна обновляемая строка в терминале (очистка строки ДО
-%%% печати заголовка и находки) и редкие строки без ANSI при
-%%% перенаправлении по абсолютному сроку. JSON использует синхронный API
-%%% и отдаёт один полный отсортированный объект без прогресса;
-%%% предупреждения при этом направляются в stderr.
+%%% наличии); при `--os' добавляется столбец приблизительной ОС с
+%%% уверенностью, при `--ports' — открытые выбранные порты. Закрытые и
+%%% молчащие порты не фильтруют находки. Остальные исходы видны только с
+%%% `--verbose'. Прогресс идёт в stderr: одна обновляемая строка в
+%%% терминале (очистка строки ДО печати заголовка и находки) и редкие
+%%% строки без ANSI при перенаправлении по абсолютному сроку. JSON
+%%% использует синхронный API и отдаёт один полный объект без прогресса;
+%%% состояния всех запрошенных портов, открытые порты, ОС с основаниями и
+%%% строковая причина ошибки инспектора сохраняются полностью.
+%%% Предупреждения при этом направляются в stderr.
+%%%
+%%% `--ports' разрешён при любом методе и означает дополнительные
+%%% проверки найденных адресов; это не фильтр IP. `--os' — неповторяемый
+%%% флаг, по умолчанию определение ОС выключено. Внутренние порты
+%%% обнаружения tcp/auto (80/443 без явного набора) в предупреждении о
+%%% fallback не перечисляются: явный `--ports' заменяет этот набор.
 %%%
 %%% Коды выхода: 2 — неверные аргументы или отклонённый запрос до проб;
 %%% 1 — недоступный метод, ошибка запуска или выполнения; 0 — поиск
@@ -29,8 +39,6 @@
 %% Частота обновления прогресса в терминале и при перенаправлении, мс.
 -define(TTY_INTERVAL_MS, 250).
 -define(PLAIN_INTERVAL_MS, 2000).
-%% Порты TCP fallback — только для текста предупреждения, не для проб.
--define(FALLBACK_PORTS, [80, 443]).
 
 %%% ------------------------------------------------------------------
 %%% Точка входа
@@ -64,7 +72,8 @@ help() ->
         "Методы обнаружения (--method):\n"
         "  auto       По маршруту ядра: ARP в подключённом Ethernet, иначе\n"
         "             ICMP echo/timestamp и raw TCP SYN/ACK; без raw-прав —\n"
-        "             переход на TCP connect (по умолчанию)\n"
+        "             переход на TCP connect к выбранным портам, а без\n"
+        "             --ports — к 80/443 (по умолчанию)\n"
         "  arp        Только ARP (Linux, raw, подключённый Ethernet)\n"
         "  icmp       ICMP echo и timestamp (Linux, raw)\n"
         "  tcp        TCP connect к указанным или 80/443 портам (без root)\n"
@@ -74,20 +83,36 @@ help() ->
         "                        выражения: 127.0.0.1,10.0.0.0/30,\n"
         "                        192.168.3-5,7.1,3-4.\n"
         "  --method <METHOD>     Метод: auto|arp|icmp|tcp|raw_tcp.\n"
-        "  --ports <PORTS>       Только с --method tcp: порты и диапазоны\n"
-        "                        через запятую. По умолчанию 80/443.\n"
-        "  --timeout <N>         Бюджет одного адреса в миллисекундах (N > 0),\n"
-        "                        включая поиск маршрута\n"
+        "  --ports <PORTS>       Необязательно, при любом методе. Порты и\n"
+        "                        диапазоны через запятую: проверяются у\n"
+        "                        каждого найденного адреса, но НЕ фильтруют\n"
+        "                        находки. Без явного набора tcp/auto\n"
+        "                        проверяют 80/443. Ограничения в 16 портов\n"
+        "                        нет; большой набор может не успеть за бюджет\n"
+        "                        адреса, тогда оставшиеся порты получают\n"
+        "                        skipped.\n"
+        "  --os                  Приблизительно определить ОС (windows|linux|\n"
+        "                        unknown) по SSH-баннеру и открытым служебным\n"
+        "                        портам. По умолчанию выключено; уверенность\n"
+        "                        medium|low|none, unknown допустим. Открытый\n"
+        "                        SSH или SMB не доказывает семью ОС.\n"
+        "  --timeout <N>         Бюджет одного адреса в миллисекундах (N > 0);\n"
+        "                        общий для поиска маршрута, пробы, чтения\n"
+        "                        баннера и проверки портов\n"
         "  --concurrency <N>     Одновременных адресов (N > 0)\n"
         "  --retries <N>         Повторов каждой пробы, 0..5\n"
         "  --json                Один полный JSON-объект вместо таблицы\n"
         "  --verbose             Показать состояние каждого адреса\n"
         "  --no-progress         Отключить прогресс и heartbeat в stderr\n\n"
         "Поведение:\n"
-        "  подтверждённые адреса печатаются сразу; отсутствие ответа не\n"
-        "  означает отсутствие компьютера. Без raw-прав auto сообщает о\n"
-        "  переходе на TCP connect. Прогресс идёт в stderr, находки и JSON —\n"
-        "  в stdout. Точное равенство результатов Nmap не обещается.\n\n"
+        "  подтверждённые адреса печатаются сразу как IP, метод и MAC;\n"
+        "  с --os добавляется столбец ОС с уверенностью и пометкой\n"
+        "  предположения, с --ports — открытые выбранные порты. Адрес\n"
+        "  печатается даже при неизвестной ОС и всех закрытых портах.\n"
+        "  TCP-таймаут не означает отсутствия компьютера. Прогресс и\n"
+        "  предупреждения идут в stderr, находки и JSON — в stdout. Nmap\n"
+        "  не используется; установка ПО, выдача прав и точное совпадение\n"
+        "  с Nmap не обещаются.\n\n"
         "Коды выхода:\n"
         "  0  поиск завершён, включая отсутствие находок и ошибки адресов\n"
         "  1  недоступный метод, ошибка запуска или выполнения\n"
@@ -109,6 +134,7 @@ parse([], Acc, Seen) ->
         true -> {ok, Acc}
     end.
 
+flag_key("--os") -> {ok, os};
 flag_key("--json") -> {ok, json};
 flag_key("--verbose") -> {ok, verbose};
 flag_key("--no-progress") -> {ok, no_progress};
@@ -183,22 +209,7 @@ retries_int(Value) ->
 %%% ------------------------------------------------------------------
 
 execute(Parsed) ->
-    case validate_ports(Parsed) of
-        {error, Message} ->
-            diagnostic("trawler discover: " ++ Message),
-            2;
-        ok ->
-            start_and_dispatch(Parsed)
-    end.
-
-%% Порты подразумевают явный TCP connect; для остальных методов ключ
-%% отклоняется, чтобы намерение пользователя не терялось молча.
-validate_ports(Parsed) ->
-    Method = maps:get(method, Parsed, auto),
-    case maps:is_key(ports, Parsed) andalso Method =/= tcp of
-        true -> {error, "option --ports is allowed only with --method tcp"};
-        false -> ok
-    end.
+    start_and_dispatch(Parsed).
 
 start_and_dispatch(Parsed) ->
     case application:ensure_all_started(trawler) of
@@ -245,7 +256,8 @@ discover_options(Parsed) ->
     O1 = add_option(ports, ports, Parsed, O0),
     O2 = add_option(timeout, timeout_ms, Parsed, O1),
     O3 = add_option(concurrency, concurrency, Parsed, O2),
-    add_option(retries, retries, Parsed, O3).
+    O4 = add_option(retries, retries, Parsed, O3),
+    add_option(os, os_detection, Parsed, O4).
 
 %% Ключи по умолчанию не добавляются: их применяет публичный API.
 add_option(CliKey, ApiKey, Parsed, Acc) ->
@@ -287,7 +299,7 @@ text_mode(Parsed, Targets, Options) ->
     case trawler:start_discovery(Targets, RecipientOptions) of
         {ok, Ref} ->
             run_text(Ref, progress_mode(Parsed),
-                     maps:get(verbose, Parsed, false));
+                     maps:get(verbose, Parsed, false), Parsed);
         {error, Reason} ->
             report_error(Reason)
     end.
@@ -297,12 +309,14 @@ text_mode(Parsed, Targets, Options) ->
 %% обработанным событиям, а итоговые числа авторитетно задаёт завершающая
 %% сводка. Иначе при быстром задании статус уже равен total, и повторный
 %% учёт событий удваивал бы прогресс и находки.
-run_text(Ref, Mode, Verbose) ->
+run_text(Ref, Mode, Verbose, Parsed) ->
     Start = erlang:monotonic_time(millisecond),
     Interval = progress_interval(Mode),
     State0 = #{ref => Ref,
                mode => Mode,
                verbose => Verbose,
+               with_os => maps:get(os, Parsed, false),
+               with_ports => maps:is_key(ports, Parsed),
                total => status_total(Ref),
                completed => 0,
                counters => zero_counters(),
@@ -365,7 +379,7 @@ text_result(Result, State) ->
 %% Периодическое обновление: прогресс по обработанным событиям и контроль
 %% доступности статуса. Статус служит только признаком жизни: его
 %% completed и счётчики не копируются, иначе они учитывались бы дважды
-%% (см. run_text/3). Потеря статуса отменяет своё задание, чтобы не
+%% (см. run_text/4). Потеря статуса отменяет своё задание, чтобы не
 %% оставить воркер после возврата кода 1.
 text_tick(State) ->
     Ref = maps:get(ref, State),
@@ -398,26 +412,98 @@ print_finding(Result, State) ->
         true ->
             State1 = clear_progress_line(State),
             State2 = print_header(State1),
-            print_result(Result),
+            print_result(Result, State2),
             redraw_progress(State2);
         false ->
             State
     end.
 
 print_header(#{header := false} = State) ->
-    io:format("~-16ts ~-12ts ~ts~n", ["IP", "МЕТОД", "MAC"]),
+    print_columns(header_columns(State)),
     State#{header := true};
 print_header(State) ->
     State.
 
-print_result(Result) ->
+%% Столбцы IP/METHOD/MAC сохраняются всегда; столбцы ОС и открытых
+%% выбранных портов добавляются только по запрошенным опциям. Последний
+%% столбец не дополняется пробелами, поэтому прежний вывод без опций
+%% побайтно совпадает со старым форматом.
+header_columns(State) ->
+    [{<<"IP">>, 16}, {<<"МЕТОД"/utf8>>, 12}, {<<"MAC">>, 18}] ++
+        header_optional_columns(State).
+
+finding_columns(Result, State) ->
+    [{ip_bin(Result), 16},
+     {method_bin(Result), 12},
+     {mac_bin(Result), 18}] ++ finding_optional_columns(Result, State).
+
+header_optional_columns(State) ->
+    header_os_columns(State) ++ header_ports_columns(State).
+
+header_os_columns(#{with_os := true}) ->
+    [{<<"ОС"/utf8>>, 32}];
+header_os_columns(_State) ->
+    [].
+
+header_ports_columns(#{with_ports := true}) ->
+    [{<<"ОТКРЫТЫЕ ПОРТЫ"/utf8>>, 0}];
+header_ports_columns(_State) ->
+    [].
+
+finding_optional_columns(Result, #{with_os := true}) ->
+    [{os_cell(Result), 32}];
+finding_optional_columns(_Result, _State) ->
+    [].
+
+%% Открытые порты — последний столбец и печатаются без выравнивания.
+ports_column(#{with_ports := true}, Result) ->
+    [{ports_cell(Result), 0}];
+ports_column(_State, _Result) ->
+    [].
+
+print_result(Result, State) ->
     case maps:get(state, Result) of
         up ->
-            io:format("~-16ts ~-12ts ~ts~n",
-                      [ip_bin(Result), method_bin(Result), mac_bin(Result)]);
+            print_columns(finding_columns(Result, State) ++
+                              ports_column(State, Result));
         Other ->
             io:format("~-16ts ~ts~n",
                       [ip_bin(Result), atom_to_binary(Other, utf8)])
+    end.
+
+print_columns(Columns) ->
+    {Init, [{_Last, _Width}]} =
+        lists:split(length(Columns) - 1, Columns),
+    Format = lists:flatten(
+               [["~-", integer_to_list(Width), "ts "] || {_Value, Width} <- Init]
+               ++ ["~ts~n"]),
+    Values = [Value || {Value, _Ignored} <- Columns],
+    io:format(Format, Values).
+
+%% Приблизительная ОС: unknown печатается как есть, распознанная семья —
+%% с уверенностью и явной пометкой предположения.
+os_cell(Result) ->
+    case maps:find(os, Result) of
+        {ok, #{family := unknown}} ->
+            <<"unknown">>;
+        {ok, #{family := Family, confidence := Confidence}} ->
+            <<(atom_to_binary(Family, utf8))/binary, " (",
+              (atom_to_binary(Confidence, utf8))/binary,
+              ", предположение)"/utf8>>;
+        _Other ->
+            <<"-">>
+    end.
+
+%% Только открытые ЯВНО выбранные порты; пустой список печатается как
+%% прочерк, а адрес остаётся находкой.
+ports_cell(Result) ->
+    case maps:find(open_ports, Result) of
+        {ok, [_ | _] = Ports} ->
+            iolist_to_binary(lists:join(
+                               <<",">>,
+                               [integer_to_binary(Port) || Port <- Ports]));
+        _Other ->
+            <<"-">>
     end.
 
 method_bin(Result) ->
@@ -584,7 +670,11 @@ result_json(Result) ->
     R1 = maybe_put(<<"method">>, find_binary(method, Result), Base),
     R2 = maybe_put(<<"mac">>, find_mac(Result), R1),
     R3 = maybe_put(<<"port">>, maps:find(port, Result), R2),
-    maybe_put(<<"reason">>, find_reason(Result), R3).
+    R4 = maybe_put(<<"reason">>, find_reason(Result), R3),
+    R5 = maybe_put(<<"port_results">>, find_port_results(Result), R4),
+    R6 = maybe_put(<<"open_ports">>, find_open_ports(Result), R5),
+    R7 = maybe_put(<<"os">>, find_os(Result), R6),
+    maybe_put(<<"inspection_error">>, find_inspection_error(Result), R7).
 
 maybe_put(Key, {ok, Value}, Map) -> Map#{Key => Value};
 maybe_put(_Key, error, Map) -> Map.
@@ -605,8 +695,64 @@ find_mac(Result) ->
 %% атомов из пользовательского ввода.
 find_reason(Result) ->
     case maps:find(reason, Result) of
-        {ok, Reason} -> {ok, format_reason(Reason)};
+        {ok, Reason} -> {ok, reason_binary(Reason)};
         error -> error
+    end.
+
+%% Полный список состояний всех явно выбранных портов, включая skipped и
+%% ошибки; причина каждого порта сериализуется так же безопасно, как
+%% причина адреса.
+find_port_results(Result) ->
+    case maps:find(port_results, Result) of
+        {ok, Rows} when is_list(Rows) -> {ok, [port_result_json(R) || R <- Rows]};
+        _Other -> error
+    end.
+
+port_result_json(#{port := Port, state := State, elapsed_ms := Elapsed} = Row) ->
+    Base = #{<<"port">> => Port,
+             <<"state">> => atom_to_binary(State, utf8),
+             <<"elapsed_ms">> => Elapsed},
+    case maps:find(reason, Row) of
+        {ok, Reason} -> Base#{<<"reason">> => reason_binary(Reason)};
+        error -> Base
+    end.
+
+find_open_ports(Result) ->
+    case maps:find(open_ports, Result) of
+        {ok, Ports} when is_list(Ports) -> {ok, Ports};
+        _Other -> error
+    end.
+
+find_os(Result) ->
+    case maps:find(os, Result) of
+        {ok, Os} when is_map(Os) -> {ok, os_json(Os)};
+        _Other -> error
+    end.
+
+%% Основания ОС — безопасные метки; передаются без потерь.
+os_json(Os) ->
+    #{<<"family">> => atom_to_binary(maps:get(family, Os, unknown), utf8),
+      <<"confidence">> => atom_to_binary(maps:get(confidence, Os, none), utf8),
+      <<"evidence">> => [evidence_bin(Item)
+                         || Item <- maps:get(evidence, Os, [])]}.
+
+evidence_bin(Item) when is_binary(Item) -> Item;
+evidence_bin(Item) -> reason_binary(Item).
+
+%% Неожиданная ошибка инспектора не теряет найденный адрес; в JSON это
+%% строка причины, а не произвольный вложенный терм.
+find_inspection_error(Result) ->
+    case maps:find(inspection_error, Result) of
+        {ok, Reason} -> {ok, reason_binary(Reason)};
+        error -> error
+    end.
+
+%% Причина в JSON — строка, а не массив кодов символов: `format_reason'
+%% возвращает список, который кодировщик JSON принял бы за массив.
+reason_binary(Reason) ->
+    case unicode:characters_to_binary(format_reason(Reason)) of
+        Bin when is_binary(Bin) -> Bin;
+        _Error -> <<"unknown">>
     end.
 
 summary_json(#{total := Total, completed := Completed, counters := Counters,
@@ -644,8 +790,8 @@ print_warnings(Summary) ->
 print_warning(tcp_fallback) ->
     io:format(standard_error,
               "trawler discover: предупреждение: raw-методы недоступны, "
-              "обнаружение через TCP connect по портам ~w~n",
-              [?FALLBACK_PORTS]);
+              "обнаружение через TCP connect; набор портов задаёт --ports, "
+              "без него используются порты по умолчанию~n", []);
 print_warning(Warning) ->
     io:format(standard_error,
               "trawler discover: предупреждение: ~ts~n",

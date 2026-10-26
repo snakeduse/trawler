@@ -33,8 +33,11 @@
 %% ```
 %% {ok, _} = application:ensure_all_started(trawler),
 %% {ok, Results, Summary} =
-%%     trawler:discover(<<"127.0.0.1">>, #{method => tcp, ports => [80, 443]}),
-%% {maps:get(counters, Summary), [maps:get(ip, R) || R <- Results]}.
+%%     trawler:discover(<<"127.0.0.1">>,
+%%                      #{method => auto, ports => [22, 445],
+%%                        os_detection => true}),
+%% {maps:get(counters, Summary),
+%%  [{maps:get(ip, R), maps:get(os, R, undefined)} || R <- Results]}.
 %% '''
 %%
 %% Пример асинхронного обнаружения:
@@ -46,6 +49,16 @@
 %%     {trawler_discovery, Ref, {done, Summary}} -> Summary
 %% end.
 %% '''
+%%
+%% Для обнаружения `ports` можно задать при любом методе: это явный
+%% уникальный набор дополнительных TCP-проверок найденных адресов.
+%% `os_detection => true` включает приблизительную классификацию ОС.
+%% Дополнительные поля `port_results`, `open_ports` и `os` появляются
+%% только у подтверждённого адреса и только по запросу; найденный адрес
+%% не фильтруется по открытым портам. Бюджет `timeout_ms` общий для
+%% маршрута, пробы, чтения баннера и проверки портов; не успевшие явные
+%% порты получают `skipped`, а ОС может остаться `unknown`. Открытый SSH
+%% или SMB — слабый признак, а не доказательство семьи ОС.
 %%
 %% Для всех функций OTP-приложение должно быть запущено; иначе
 %% возвращается `{error, not_started}'. Ссылки сканирования и

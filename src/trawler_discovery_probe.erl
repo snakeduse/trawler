@@ -109,7 +109,6 @@
 -define(DEFAULT_TIMEOUT_MS, 1000).
 -define(DEFAULT_RETRIES, 2).
 -define(MAX_RETRIES, 5).
--define(MAX_PORTS, 16).
 -define(MIN_RTO, 50).
 
 %%% ------------------------------------------------------------------
@@ -197,19 +196,17 @@ require_cap(Kind, Caps) ->
 %% @doc Нормализует выбранные TCP-порты.
 %%
 %% Принимает непустой список целых 1..65535, убирает повторы, сортирует
-%% по возрастанию и допускает не более 16 портов. Иные значения —
-%% ошибка, чтобы намерение пользователя не терялось молча.
+%% по возрастанию. Число портов не ограничено сверх допустимого
+%% диапазона номеров: набор из 65535 уникальных значений принимается.
+%% Иные значения — ошибка, чтобы намерение пользователя не терялось
+%% молча.
 -spec normalize_ports(term()) -> {ok, [1..65535]} | {error, term()}.
 normalize_ports(Ports) when is_list(Ports), Ports =/= [] ->
     case lists:all(fun valid_port/1, Ports) of
         false ->
             {error, {invalid_ports, Ports}};
         true ->
-            Unique = lists:usort(Ports),
-            case length(Unique) =< ?MAX_PORTS of
-                true -> {ok, Unique};
-                false -> {error, {too_many_ports, length(Unique)}}
-            end
+            {ok, lists:usort(Ports)}
     end;
 normalize_ports(Ports) ->
     {error, {invalid_ports, Ports}}.
@@ -530,24 +527,25 @@ probe(tcp, IP, _Route, Ports, Wait, _Timing) ->
 
 tcp_connect_probe(IP, Ports, Wait) ->
     Deadline = erlang:monotonic_time(millisecond) + Wait,
-    connect_ports(IP, Ports, Deadline, undefined).
+    connect_ports(IP, Ports, length(Ports), Deadline, undefined).
 
 %% Один абсолютный срок на всю серию портов: дедлайн не продлевается
 %% каждым следующим портом, а остаток делится поровну между ещё не
 %% проверенными портами, поэтому суммарное ожидание не превосходит
-%% бюджет адреса и не умножается на число портов.
-connect_ports(_IP, [], _Deadline, Error) ->
+%% бюджет адреса и не умножается на число портов. Оставшееся число
+%% портов передаётся счётчиком, чтобы обход большого набора был
+%% линейным без повторного length/1.
+connect_ports(_IP, [], _PortsLeft, _Deadline, Error) ->
     case Error of
         undefined -> timeout;
         Reason -> {error, Reason}
     end;
-connect_ports(IP, [Port | Rest], Deadline, Error) ->
+connect_ports(IP, [Port | Rest], PortsLeft, Deadline, Error) ->
     Remaining = Deadline - erlang:monotonic_time(millisecond),
     case Remaining > 0 of
         false ->
-            connect_ports(IP, [], Deadline, Error);
+            connect_ports(IP, [], 0, Deadline, Error);
         true ->
-            PortsLeft = length(Rest) + 1,
             Wait = min(Remaining, max(1, Remaining div PortsLeft)),
             SendTime = erlang:monotonic_time(millisecond),
             case gen_tcp:connect(IP, Port, [inet, {active, false}], Wait) of
@@ -558,9 +556,9 @@ connect_ports(IP, [Port | Rest], Deadline, Error) ->
                     %% Закрытый порт — действительный ответ, подтверждающий хост.
                     {up, tcp_refused, #{port => Port, rtt_ms => rtt(SendTime)}};
                 {error, timeout} ->
-                    connect_ports(IP, Rest, Deadline, Error);
+                    connect_ports(IP, Rest, PortsLeft - 1, Deadline, Error);
                 {error, Reason} ->
-                    connect_ports(IP, Rest, Deadline, Reason)
+                    connect_ports(IP, Rest, PortsLeft - 1, Deadline, Reason)
             end
     end.
 

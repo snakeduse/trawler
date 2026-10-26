@@ -17,8 +17,10 @@
 %%% Пример синхронного обнаружения на loopback:
 %%% ```
 %%% {ok, Results, Summary} = trawler_discovery:run(<<"127.0.0.1">>,
-%%%                                                #{method => tcp,
-%%%                                                  ports => [80, 443]}).
+%%%                                                #{method => auto,
+%%%                                                  ports => [22, 445],
+%%%                                                  os_detection => true}).
+%%% [maps:get(port_results, R, []) || R <- Results].
 %%% '''
 %%%
 %%% Пример асинхронного обнаружения:
@@ -30,6 +32,20 @@
 %%%     {trawler_discovery, Ref, {done, Summary}} -> Summary
 %%% end.
 %%% '''
+%%%
+%%% Опция `ports' допускается при любом методе: явный уникальный набор
+%%% проверяется у каждого подтверждённого адреса и возвращается в полях
+%%% `port_results' и `open_ports'. Для `tcp' и TCP fallback этот же набор
+%%% участвует в первоначальном обнаружении; без явного набора остаются
+%%% порты 80/443. Опция `os_detection' принимает только boolean, по
+%%% умолчанию выключена; при включении в результат добавляется `os' с
+%%% приблизительной семьёй, уверенностью и безопасными основаниями.
+%%% Дополнительные проверки не фильтруют найденные адреса и делят общий
+%%% бюджет адреса: не успевшие явные порты получают `skipped', а
+%%% запрошенная ОС может остаться `unknown/none'. Открытые порты дают лишь
+%%% слабые признаки; `os_detection' по умолчанию выключена. Внутренний
+%%% `probe_ports' в публичные опции не входит и отклоняется как
+%%% неизвестный ключ.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(trawler_discovery).
@@ -48,7 +64,10 @@
 
 %% Результат одного адреса; `method' присутствует у `up', `mac' — у ARP,
 %% `port' — у TCP, `rtt_ms' — у подтверждённой первой отправки, `reason'
-%% — у `error'.
+%% — у `error'. Дополнительные поля `port_results' и `open_ports'
+%% появляются только при явном наборе портов, `os' — при включённой
+%% классификации, `inspection_error' — при неожиданной ошибке инспектора
+%% (адрес остаётся `up').
 -type result() :: #{ip := ip4(),
                     state := result_state(),
                     elapsed_ms := non_neg_integer(),
@@ -57,7 +76,12 @@
                     mac => binary(),
                     port => 1..65535,
                     rtt_ms => non_neg_integer(),
-                    reason => term()}.
+                    reason => term(),
+                    port_results =>
+                        [trawler_host_inspection:port_result()],
+                    open_ports => [trawler_host_inspection:tcp_port()],
+                    os => trawler_host_inspection:os_map(),
+                    inspection_error => term()}.
 
 -type counters() :: #{up := non_neg_integer(),
                       no_response := non_neg_integer(),
@@ -84,8 +108,13 @@
                | {error, term(), summary()}.
 
 %% Опции обнаружения. `recipient' — только для асинхронного API.
+%% `ports' в нормализованных опциях присутствует только при явном
+%% вводе. Внутренний `probe_ports' (набор транспорта для tcp/auto) в
+%% публичный тип не входит: фасад его не принимает и отклоняет как
+%% неизвестный ключ.
 -type options() :: #{method => method(),
                      ports => trawler_targets:ports_input(),
+                     os_detection => boolean(),
                      timeout_ms => pos_integer(),
                      concurrency => pos_integer(),
                      retries => 0..5,
@@ -97,7 +126,6 @@
 -define(DEFAULT_RETRIES, 2).
 -define(MAX_RETRIES, 5).
 -define(DEFAULT_MAX_CONCURRENCY, 256).
--define(MAX_PORTS, 16).
 %% Порты TCP-обнаружения по умолчанию: меньше, чем у сканирования.
 -define(DEFAULT_DISCOVERY_PORTS, [80, 443]).
 
@@ -267,28 +295,18 @@ prepare_targets(Targets, Norm, Mode) ->
         {error, _} = Error ->
             Error;
         {ok, Ranges} ->
-            Method = maps:get(method, Norm),
-            case discovery_ports(Method, Norm) of
-                {error, _} = Error ->
-                    Error;
-                {ok, Ports} ->
-                    prepare_caps(Targets, Norm, Mode, Ranges, Method, Ports)
-            end
+            prepare_caps(Norm, Mode, Ranges)
     end.
 
-prepare_caps(_Targets, Norm, Mode, Ranges, Method, Ports) ->
+prepare_caps(Norm, Mode, Ranges) ->
     Caps = trawler_discovery_probe:capabilities(),
-    case trawler_discovery_probe:prepare(Method, Caps) of
+    case trawler_discovery_probe:prepare(maps:get(method, Norm), Caps) of
         {error, _} = Error ->
             Error;
         {ok, _Effective, Warnings} ->
             Ref = make_ref(),
-            Base = with_recipient(Norm#{caps => Caps},
+            Opts = with_recipient(Norm#{caps => Caps},
                                   recipient(Mode, Norm)),
-            Opts = case Ports of
-                       undefined -> Base;
-                       _ -> Base#{ports => Ports}
-                   end,
             {ok, Ref, expand_addrs(Ranges), Opts, Warnings}
     end.
 
@@ -335,8 +353,8 @@ start_child(Ref, Addrs, Opts, Warnings, Owner) ->
 %%% ------------------------------------------------------------------
 
 validate_options(Options, Mode) when is_map(Options) ->
-    Known = [method, ports, timeout_ms, concurrency, retries, deadline_ms,
-             recipient],
+    Known = [method, ports, os_detection, timeout_ms, concurrency, retries,
+             deadline_ms, recipient],
     case unknown_key(maps:keys(Options), Known) of
         ok -> validate_values(Options, Mode);
         {error, _} = Error -> Error
@@ -379,6 +397,7 @@ build_options(Options, Method, Recipient) ->
     Concurrency = maps:get(concurrency, Options, ?DEFAULT_CONCURRENCY),
     Retries = maps:get(retries, Options, ?DEFAULT_RETRIES),
     Deadline = maps:get(deadline_ms, Options, infinity),
+    OSDetection = maps:get(os_detection, Options, false),
     case valid_timeout(Timeout) of
         false ->
             {error, {invalid_options, {timeout_ms, Timeout}}};
@@ -396,27 +415,82 @@ build_options(Options, Method, Recipient) ->
                                     {error, {invalid_options,
                                              {deadline_ms, Deadline}}};
                                 true ->
-                                    Norm0 = #{method => Method,
-                                              timeout_ms => Timeout,
-                                              concurrency => clamp_concurrency(
-                                                               Concurrency),
-                                              retries => Retries,
-                                              deadline_ms => Deadline},
-                                    Norm = with_ports(Norm0, Options),
-                                    {ok, with_recipient(Norm, Recipient)}
+                                    build_with_inspection(
+                                      Options, Method, Recipient, Timeout,
+                                      Concurrency, Retries, Deadline,
+                                      OSDetection)
                             end
                     end
             end
     end.
 
-%% Сырой ввод портов сохраняется в нормализованных опциях, чтобы
-%% discovery_ports/2 мог либо разобрать его для tcp/auto, либо отклонить
-%% для методов без TCP — намерение пользователя не теряется молча.
-with_ports(Norm, Options) ->
-    case maps:find(ports, Options) of
-        {ok, Ports} -> Norm#{ports => Ports};
-        error -> Norm
+build_with_inspection(Options, Method, Recipient, Timeout, Concurrency,
+                      Retries, Deadline, OSDetection) ->
+    case valid_os_detection(OSDetection) of
+        false ->
+            {error, {invalid_options, {os_detection, OSDetection}}};
+        true ->
+            case requested_ports(Options, Method) of
+                {error, _} = Error ->
+                    Error;
+                {ok, Explicit, Probe} ->
+                    Norm0 = #{method => Method,
+                              timeout_ms => Timeout,
+                              concurrency => clamp_concurrency(Concurrency),
+                              retries => Retries,
+                              deadline_ms => Deadline,
+                              os_detection => OSDetection},
+                    Norm1 = put_optional(ports, Explicit, Norm0),
+                    Norm2 = put_optional(probe_ports, Probe, Norm1),
+                    {ok, with_recipient(Norm2, Recipient)}
+            end
     end.
+
+%% Явный набор портов разбирается при любом методе: это дополнительные
+%% проверки найденных адресов. Транспорт получает отдельный probe_ports
+%% только для tcp/auto: там явный набор либо [80,443] участвует в
+%% обнаружении. Для arp/icmp/raw_tcp ключ отсутствует, поэтому
+%% транспорт по-прежнему не принимает порты с этими методами.
+requested_ports(Options, Method) ->
+    case maps:find(ports, Options) of
+        error ->
+            {ok, undefined, probe_ports(Method, undefined)};
+        {ok, Input} ->
+            case parse_ports_input(Input) of
+                {error, _} = Error ->
+                    Error;
+                {ok, Ranges} ->
+                    Ports = lists:usort(flatten_ports(Ranges)),
+                    {ok, Ports, probe_ports(Method, Ports)}
+            end
+    end.
+
+%% Parser портов рассчитан на поддерживаемые формы; для прочих элементов
+%% (например, целого 0) он не имеет клаузы. Публичная валидация обязана
+%% вернуть ошибку до сети, а не исключение.
+parse_ports_input(Input) ->
+    try
+        trawler_targets:parse_ports(Input)
+    catch
+        error:_Reason ->
+            {error, {invalid_ports, Input}}
+    end.
+
+probe_ports(tcp, undefined) ->
+    ?DEFAULT_DISCOVERY_PORTS;
+probe_ports(auto, undefined) ->
+    ?DEFAULT_DISCOVERY_PORTS;
+probe_ports(tcp, Ports) ->
+    Ports;
+probe_ports(auto, Ports) ->
+    Ports;
+probe_ports(_Method, _Ports) ->
+    undefined.
+
+put_optional(_Key, undefined, Map) ->
+    Map;
+put_optional(Key, Value, Map) ->
+    Map#{Key => Value}.
 
 with_recipient(Norm, undefined) -> Norm;
 with_recipient(Norm, Recipient) -> Norm#{recipient => Recipient}.
@@ -439,6 +513,9 @@ valid_deadline(infinity) -> true;
 valid_deadline(Deadline) when is_integer(Deadline), Deadline > 0 -> true;
 valid_deadline(_) -> false.
 
+valid_os_detection(Value) when is_boolean(Value) -> true;
+valid_os_detection(_) -> false.
+
 clamp_concurrency(Concurrency) ->
     min(Concurrency, global_max_concurrency()).
 
@@ -452,31 +529,6 @@ global_max_concurrency() ->
 %%% ------------------------------------------------------------------
 %%% Порты и служебные функции
 %%% ------------------------------------------------------------------
-
-%% Порты допустимы только для явного TCP connect. Для `tcp' без ключа
-%% используется набор по умолчанию [80,443]; явный ввод разбирается
-%% существующим parser'ом (атом default даёт 1000 портов и отклоняется
-%% как too_many_ports, без молчаливой подмены значения). Для auto, arp,
-%% icmp и raw_tcp ключ ports отклоняется: auto сам выбирает методы, а
-%% явные порты здесь не подразумеваются.
-discovery_ports(tcp, Norm) ->
-    Input = maps:get(ports, Norm, ?DEFAULT_DISCOVERY_PORTS),
-    case trawler_targets:parse_ports(Input) of
-        {error, _} = Error ->
-            Error;
-        {ok, Ranges} ->
-            Ports = lists:usort(flatten_ports(Ranges)),
-            case length(Ports) =< ?MAX_PORTS of
-                true -> {ok, Ports};
-                false -> {error, {invalid_options,
-                                  {too_many_ports, length(Ports)}}}
-            end
-    end;
-discovery_ports(_Method, Norm) ->
-    case maps:is_key(ports, Norm) of
-        true -> {error, {invalid_options, ports}};
-        false -> {ok, undefined}
-    end.
 
 flatten_ports(Ranges) ->
     lists:append([lists:seq(First, Last) || {First, Last} <- Ranges]).

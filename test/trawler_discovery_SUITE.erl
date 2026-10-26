@@ -13,13 +13,16 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
          loopback_open_sync/1, loopback_refused_sync/1,
-         sync_async_equivalent/1, shared_capacity_with_scan/1]).
+         sync_async_equivalent/1, shared_capacity_with_scan/1,
+         inspection_fields_sync/1, inspection_sync_async_equivalent/1,
+         auto_ports_closed_up/1]).
 
 -define(LO, <<"127.0.0.1">>).
 
 all() ->
     [loopback_open_sync, loopback_refused_sync, sync_async_equivalent,
-     shared_capacity_with_scan].
+     shared_capacity_with_scan, inspection_fields_sync,
+     inspection_sync_async_equivalent, auto_ports_closed_up].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(trawler),
@@ -112,6 +115,77 @@ shared_capacity_with_scan(_Config) ->
     end,
     ok.
 
+%% Публичное API: явные порты и os_detection дают сортированные
+%% port_results, только явные open_ports и карту os с безопасными
+%% основаниями; ОС-порты в открытые выбранные порты не попадают.
+inspection_fields_sync(_Config) ->
+    {BannerPid, Open} = banner_listener(),
+    Closed = closed_port(),
+    try
+        {ok, [Result], Summary} =
+            trawler:discover(?LO, #{method => tcp,
+                                    ports => [Open, Closed],
+                                    os_detection => true,
+                                    retries => 0,
+                                    timeout_ms => 3000}),
+        up = maps:get(state, Result),
+        true = lists:member(maps:get(method, Result), [tcp_open, tcp_refused]),
+        Rows = maps:get(port_results, Result),
+        PortsSorted = lists:sort([Open, Closed]),
+        PortsSorted = [maps:get(port, Row) || Row <- Rows],
+        open = maps:get(state, row(Open, Rows)),
+        closed = maps:get(state, row(Closed, Rows)),
+        [Open] = maps:get(open_ports, Result),
+        Os = maps:get(os, Result),
+        linux = maps:get(family, Os),
+        medium = maps:get(confidence, Os),
+        true = is_list(maps:get(evidence, Os)),
+        false = maps:is_key(inspection_error, Result),
+        #{total := 1, completed := 1} = Summary,
+        #{up := 1} = maps:with([up], maps:get(counters, Summary))
+    after
+        exit(BannerPid, kill)
+    end,
+    ok.
+
+%% Публичное API: sync и async эквивалентны по дополнительным полям без
+%% учёта длительностей.
+inspection_sync_async_equivalent(_Config) ->
+    {BannerPid, Open} = banner_listener(),
+    Closed = closed_port(),
+    Opts = #{method => tcp, ports => [Open, Closed], os_detection => true,
+             retries => 0, timeout_ms => 3000},
+    try
+        {ok, [Sync], _SyncSummary} = trawler:discover(?LO, Opts),
+        {ok, Ref} = trawler:start_discovery(?LO, Opts#{recipient => self()}),
+        {[Async], _AsyncSummary} = receive_until_done(Ref, 5000, []),
+        up = maps:get(state, Sync),
+        up = maps:get(state, Async),
+        SyncRows = strip_elapsed(maps:get(port_results, Sync)),
+        AsyncRows = strip_elapsed(maps:get(port_results, Async)),
+        SyncRows = AsyncRows,
+        SyncOpen = maps:get(open_ports, Sync),
+        SyncOpen = maps:get(open_ports, Async),
+        SyncOs = maps:get(os, Sync),
+        SyncOs = maps:get(os, Async)
+    after
+        exit(BannerPid, kill)
+    end,
+    ok.
+
+%% auto на loopback подтверждается как local, а закрытые явные порты не
+%% фильтруют находку.
+auto_ports_closed_up(_Config) ->
+    Closed = closed_port(),
+    {ok, [Result], _Summary} =
+        trawler:discover(?LO, #{method => auto, ports => [Closed],
+                               retries => 0}),
+    up = maps:get(state, Result),
+    local = maps:get(method, Result),
+    [#{port := Closed, state := closed}] = maps:get(port_results, Result),
+    [] = maps:get(open_ports, Result),
+    ok.
+
 %%% ------------------------------------------------------------------
 %%% Вспомогательные функции
 %%% ------------------------------------------------------------------
@@ -128,6 +202,34 @@ closed_port() ->
     {ok, Port} = inet:port(Socket),
     ok = gen_tcp:close(Socket),
     Port.
+
+%% Слушатель с корректной SSH identification: каждый connect получает
+%% Ubuntu-баннер, поэтому классификация детерминирована и не зависит от
+%% реального sshd на 127.0.0.1:22.
+banner_listener() ->
+    {ok, Listen} = gen_tcp:listen(0, [inet, {ip, {127, 0, 0, 1}},
+                                      {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(Listen),
+    Pid = spawn(fun() -> banner_accept_loop(Listen) end),
+    {Pid, Port}.
+
+banner_accept_loop(Listen) ->
+    case gen_tcp:accept(Listen) of
+        {ok, Socket} ->
+            _ = gen_tcp:send(Socket,
+                             <<"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1\r\n">>),
+            _ = gen_tcp:close(Socket),
+            banner_accept_loop(Listen);
+        {error, _Reason} ->
+            _ = gen_tcp:close(Listen),
+            ok
+    end.
+
+strip_elapsed(Rows) ->
+    [maps:remove(elapsed_ms, Row) || Row <- Rows].
+
+row(Port, Rows) ->
+    hd([Row || #{port := P} = Row <- Rows, P =:= Port]).
 
 %% Слушатель с заполненной очередью приёма: connect к нему блокируется
 %% до таймаута, поэтому воркер остаётся активным детерминированно.

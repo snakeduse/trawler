@@ -94,10 +94,12 @@ prepare_invalid_method_test() ->
 normalize_ports_dedup_sorted_test() ->
     ?assertEqual({ok, [80, 443]}, trawler_discovery_probe:normalize_ports([443, 80, 443])).
 
-normalize_ports_limit_test() ->
-    ?assertEqual({ok, lists:seq(1, 16)},
-                 trawler_discovery_probe:normalize_ports(lists:seq(16, 1, -1))),
-    ?assertMatch({error, _}, trawler_discovery_probe:normalize_ports(lists:seq(1, 17))).
+normalize_ports_accepts_many_test() ->
+    ?assertEqual({ok, lists:seq(1, 17)},
+                 trawler_discovery_probe:normalize_ports(lists:seq(17, 1, -1))),
+    ?assertEqual({ok, lists:seq(1, 65535)},
+                 trawler_discovery_probe:normalize_ports(
+                   lists:seq(65535, 1, -1))).
 
 normalize_ports_rejects_invalid_test() ->
     ?assertMatch({error, _}, trawler_discovery_probe:normalize_ports([0])),

@@ -25,7 +25,10 @@
          discover_no_found_hidden/1, discover_no_found_verbose/1,
          discover_error_finish/1, discover_cancelled_finish/1,
          discover_json_sync_warning/1, discover_status_ahead/1,
-         discover_status_ahead_tick/1, discover_status_exception/1]).
+         discover_status_ahead_tick/1, discover_status_exception/1,
+         discover_auto_ports_closed/1, discover_os_unknown/1,
+         discover_ports_columns/1, discover_json_full/1,
+         discover_json_os_only/1, discover_json_real_os/1]).
 
 -define(LO, <<"127.0.0.1">>).
 
@@ -38,7 +41,9 @@ all() ->
      discover_no_found_verbose, discover_error_finish,
      discover_cancelled_finish, discover_json_sync_warning,
      discover_status_ahead, discover_status_ahead_tick,
-     discover_status_exception].
+     discover_status_exception, discover_auto_ports_closed,
+     discover_os_unknown, discover_ports_columns, discover_json_full,
+     discover_json_os_only, discover_json_real_os].
 
 init_per_suite(Config) ->
     Config.
@@ -56,6 +61,14 @@ discover_help(Config) ->
     must_contain(Out, <<"auto">>),
     must_contain(Out, <<"raw_tcp">>),
     must_contain(Out, <<"--method">>),
+    must_contain(Out, <<"--os">>),
+    must_contain(Out, <<"при любом методе"/utf8>>),
+    must_contain(Out, <<"НЕ фильтруют"/utf8>>),
+    must_contain(Out, <<"skipped">>),
+    must_contain(Out, <<"По умолчанию выключено"/utf8>>),
+    must_contain(Out, <<"Nmap">>),
+    must_not_contain(Out, <<"Только с --method tcp">>),
+    must_not_contain(Out, <<"более 16">>),
     must_contain(Out, <<"--no-progress">>),
     ok.
 
@@ -69,6 +82,8 @@ discover_text(Config) ->
                        "--ports", integer_to_list(Port)], Config),
         must_contain(Out, <<"127.0.0.1">>),
         must_contain(Out, <<"tcp_open">>),
+        must_contain(Out, <<"ОТКРЫТЫЕ ПОРТЫ"/utf8>>),
+        must_contain(Out, integer_to_binary(Port)),
         must_contain(Out, <<"Найдено отвечающих адресов: 1"/utf8>>),
         must_contain(Out, <<"Завершено: 1 из 1"/utf8>>),
         true = progress_lines(Err) >= 2,
@@ -141,12 +156,81 @@ discover_json_auto(Config) ->
     must_not_contain(Err, <<"Проверено"/utf8>>),
     ok.
 
+%% auto + явные --ports: закрытый порт не фильтрует найденный локальный
+%% адрес, а столбец открытых выбранных портов показывает только
+%% открытый. Это реальный escript на loopback, без подмены ядра.
+discover_auto_ports_closed(Config) ->
+    {Listen, Open} = open_listener(),
+    Closed = closed_port(),
+    try
+        {0, Out, Err} =
+            run_split(["discover", "--targets", "127.0.0.1",
+                       "--method", "auto",
+                       "--ports", integer_to_list(Open) ++ ","
+                           ++ integer_to_list(Closed),
+                       "--no-progress"], Config),
+        must_contain(Out, <<"127.0.0.1">>),
+        must_contain(Out, <<"local">>),
+        must_contain(Out, <<"ОТКРЫТЫЕ ПОРТЫ"/utf8>>),
+        Finding = finding_line(Out),
+        must_contain(Finding, integer_to_binary(Open)),
+        must_not_contain(Finding, integer_to_binary(Closed)),
+        must_contain(Out, <<"Найдено отвечающих адресов: 1"/utf8>>),
+        must_contain(Out, <<"Завершено: 1 из 1"/utf8>>),
+        must_not_contain(Err, <<"Проверено"/utf8>>)
+    after
+        ok = gen_tcp:close(Listen)
+    end,
+    ok.
+
+%% Документированный пример --os --ports --json на loopback: полный
+%% JSON-объект, все явные порты с состояниями, open_ports и os с
+%% семейством, уверенностью и основаниями. Проверяется форма, а не
+%% конкретная семья ОС реальной машины.
+discover_json_real_os(Config) ->
+    {0, Out, Err} =
+        run_split(["discover", "--targets", "127.0.0.1",
+                   "--ports", "22,445", "--os", "--json"], Config),
+    Map = json:decode(string:trim(Out)),
+    [Result] = maps:get(<<"results">>, Map),
+    <<"127.0.0.1">> = maps:get(<<"ip">>, Result),
+    <<"up">> = maps:get(<<"state">>, Result),
+    <<"local">> = maps:get(<<"method">>, Result),
+    Rows = maps:get(<<"port_results">>, Result),
+    [22, 445] = [maps:get(<<"port">>, Row) || Row <- Rows],
+    true = lists:all(
+             fun(Row) ->
+                     lists:member(maps:get(<<"state">>, Row),
+                                  [<<"open">>, <<"closed">>, <<"timeout">>,
+                                   <<"unreachable">>, <<"error">>,
+                                   <<"skipped">>])
+             end, Rows),
+    OpenPorts = maps:get(<<"open_ports">>, Result),
+    true = lists:all(fun is_integer/1, OpenPorts),
+    Os = maps:get(<<"os">>, Result),
+    true = lists:member(maps:get(<<"family">>, Os),
+                        [<<"windows">>, <<"linux">>, <<"unknown">>]),
+    true = lists:member(maps:get(<<"confidence">>, Os),
+                        [<<"medium">>, <<"low">>, <<"none">>]),
+    true = lists:all(fun is_binary/1, maps:get(<<"evidence">>, Os)),
+    Summary = maps:get(<<"summary">>, Map),
+    1 = maps:get(<<"total">>, Summary),
+    1 = maps:get(<<"completed">>, Summary),
+    must_not_contain(Err, <<"Проверено"/utf8>>),
+    ok.
+
 discover_invalid(Config) ->
     {2, _} = run(["discover", "--method", "tcp"], Config),
     {2, _} = run(["discover", "--targets", "127.0.0.1", "--method", "bogus"],
                  Config),
-    %% Порты вне tcp отклоняются до любых проб.
-    {2, _} = run(["discover", "--targets", "127.0.0.1", "--ports", "80"], Config),
+    %% Порты допустимы при любом методе, но неверный номер отклоняется
+    %% до любых проб; повтор и значение флага --os также дают код 2.
+    {2, _} = run(["discover", "--targets", "127.0.0.1", "--method", "auto",
+                  "--ports", "70000"], Config),
+    {2, _} = run(["discover", "--targets", "127.0.0.1", "--method", "arp",
+                  "--ports", "0"], Config),
+    {2, _} = run(["discover", "--targets", "127.0.0.1", "--os", "true"],
+                 Config),
     {2, _} = run(["discover", "--targets", "127.0.0.1", "--method", "tcp",
                   "--retries", "9"], Config),
     {2, _} = run(["discover", "--targets", "127.0.0.1", "--bogus", "1"], Config),
@@ -165,6 +249,15 @@ discover_duplicate_flags(Config) ->
                                  "--no-progress"], Config),
     <<>> = Out2,
     must_contain(Err2, <<"duplicate">>),
+    {2, Out3, Err3} = run_split(["discover", "--targets", "127.0.0.1",
+                                 "--method", "tcp", "--os", "--os"], Config),
+    <<>> = Out3,
+    must_contain(Err3, <<"duplicate">>),
+    {2, Out4, Err4} = run_split(["discover", "--targets", "127.0.0.1",
+                                 "--method", "tcp", "--ports", "80",
+                                 "--ports", "443"], Config),
+    <<>> = Out4,
+    must_contain(Err4, <<"duplicate">>),
     ok.
 
 %% Явный raw-метод: без прав — код 1 и понятная диагностика; с правами —
@@ -194,31 +287,37 @@ discover_raw_unavailable(Config) ->
 discover_heartbeat(Config) ->
     Script = #{total => 2, status => ok, steps => [
         {sleep, 2200},
-        {result, up_result({127, 0, 0, 1}, tcp_open)},
-        {result, up_result({127, 0, 0, 2}, tcp_refused)},
+        {result, up_result_extra({127, 0, 0, 1}, tcp_open, live_extra([80]))},
+        {result, up_result_extra({127, 0, 0, 2}, tcp_refused, live_extra([]))},
         {done, summary(2, 2, #{up => 2})}]},
     {Driver, ScriptFile} = fake_driver(Config, Script),
-    {0, Out, Err} = run_split_env(Driver, discover_args(), fake_env(ScriptFile),
-                                  Config),
+    {0, Out, Err} = run_split_env(Driver, discover_args() ++ ["--os"],
+                                  fake_env(ScriptFile), Config),
     true = progress_lines(Err) >= 3,
     must_contain(Err, <<"Проверено 0/2 (0%)"/utf8>>),
     must_contain(Err, <<"Проверено 2/2 (100%)"/utf8>>),
     must_contain(Out, <<"Завершено: 2 из 2"/utf8>>),
     must_contain(Out, <<"127.0.0.1">>),
     must_contain(Out, <<"tcp_open">>),
+    must_contain(Out, <<"ОС"/utf8>>),
+    must_contain(Out, <<"linux">>),
     must_contain(Out, <<"127.0.0.2">>),
     ok.
 
 %% Находка приходит до завершения поиска.
 discover_stream_pre_finish(Config) ->
+    Extra = #{os => #{family => linux, confidence => low,
+                      evidence => [<<"tcp_open:80">>]}},
     Script = #{total => 1, status => ok, steps => [
-        {result, up_result({127, 0, 0, 1}, tcp_open)},
+        {result, up_result_extra({127, 0, 0, 1}, tcp_open, Extra)},
         {sleep, 1500},
         {done, summary(1, 1, #{up => 1})}]},
     {Driver, ScriptFile} = fake_driver(Config, Script),
-    {0, _Out, Early} = run_stream_check(Driver, discover_args(),
-                                        fake_env(ScriptFile), <<"tcp_open">>),
+    {0, Out, Early} = run_stream_check(Driver, discover_args() ++ ["--os"],
+                                       fake_env(ScriptFile), <<"tcp_open">>),
     true = Early,
+    must_contain(Out, <<"ОС"/utf8>>),
+    must_contain(Out, <<"linux">>),
     ok.
 
 %% Потеря статуса во время непрерывного потока: завершение ограничено и
@@ -248,17 +347,20 @@ discover_stream_status_lost_no_progress(Config) ->
 %% завершается переводом строки.
 discover_tty_line(Config) ->
     Script = #{total => 2, status => ok, steps => [
-        {result, up_result({127, 0, 0, 1}, tcp_open)},
+        {result, up_result_extra({127, 0, 0, 1}, tcp_open, live_extra([80]))},
         {sleep, 400},
-        {result, up_result({127, 0, 0, 2}, tcp_refused)},
+        {result, up_result_extra({127, 0, 0, 2}, tcp_refused, live_extra([]))},
         {done, summary(2, 2, #{up => 2})}]},
     {Driver, ScriptFile} = fake_driver(Config, Script),
-    {0, Raw} = run_pty(Driver, discover_args(), fake_env(ScriptFile), Config),
+    {0, Raw} = run_pty(Driver, discover_args() ++ ["--os"],
+                       fake_env(ScriptFile), Config),
     must_contain(Raw, <<"\r">>),
     must_contain(Raw, <<"\e[K">>),
     must_contain(Raw, <<"\e[KIP">>),
     must_contain(Raw, <<"tcp_open">>),
     must_contain(Raw, <<"tcp_refused">>),
+    must_contain(Raw, <<"ОС"/utf8>>),
+    must_contain(Raw, <<"linux">>),
     true = binary:last(Raw) =:= $\n,
     ok.
 
@@ -274,6 +376,8 @@ discover_warning_no_progress(Config) ->
                                   discover_args() ++ ["--no-progress"],
                                   fake_env(ScriptFile), Config),
     must_contain(Err, <<"raw-методы недоступны"/utf8>>),
+    must_not_contain(Err, <<"80/443">>),
+    must_not_contain(Err, <<"по портам"/utf8>>),
     must_not_contain(Err, <<"Проверено"/utf8>>),
     must_contain(Out, <<"tcp_open">>),
     ok.
@@ -362,6 +466,116 @@ discover_json_sync_warning(Config) ->
     [<<"tcp_fallback">>] = maps:get(<<"warnings">>, SummaryJson),
     must_contain(Err, <<"raw-методы недоступны"/utf8>>),
     must_not_contain(Err, <<"Проверено"/utf8>>),
+    ok.
+
+%% Детерминированный unknown: даже при --os CLI печатает unknown без
+%% ложного предположения о семье ОС.
+discover_os_unknown(Config) ->
+    Extra = #{os => #{family => unknown, confidence => none, evidence => []}},
+    Script = #{total => 1, status => ok, steps => [
+        {result, up_result_extra({127, 0, 0, 1}, tcp_open, Extra)},
+        {done, summary(1, 1, #{up => 1})}]},
+    {Driver, ScriptFile} = fake_driver(Config, Script),
+    {0, Out, _Err} = run_split_env(Driver,
+                                   discover_args() ++ ["--os", "--no-progress"],
+                                   fake_env(ScriptFile), Config),
+    must_contain(Out, <<"ОС"/utf8>>),
+    must_contain(Out, <<"unknown">>),
+    must_not_contain(Out, <<"предположение"/utf8>>),
+    must_contain(Out, <<"Найдено отвечающих адресов: 1"/utf8>>),
+    ok.
+
+%% Все выбранные порты закрыты: адрес остаётся находкой, столбец
+%% открытых портов печатает прочерк, а не скрывает IP.
+discover_ports_columns(Config) ->
+    Extra = #{port_results => [#{port => 80, state => closed, elapsed_ms => 1}],
+              open_ports => [],
+              os => #{family => unknown, confidence => none, evidence => []}},
+    Script = #{total => 1, status => ok, steps => [
+        {result, up_result_extra({127, 0, 0, 1}, tcp_open, Extra)},
+        {done, summary(1, 1, #{up => 1})}]},
+    {Driver, ScriptFile} = fake_driver(Config, Script),
+    {0, Out, _Err} = run_split_env(Driver,
+                                   discover_args() ++ ["--os", "--no-progress"],
+                                   fake_env(ScriptFile), Config),
+    must_contain(Out, <<"ОС"/utf8>>),
+    must_contain(Out, <<"unknown">>),
+    must_contain(Out, <<"ОТКРЫТЫЕ ПОРТЫ"/utf8>>),
+    Finding = finding_line(Out),
+    must_contain(Finding, <<"tcp_open">>),
+    must_contain(Finding, <<"-">>),
+    must_not_contain(Finding, <<"80">>),
+    must_contain(Out, <<"Найдено отвечающих адресов: 1"/utf8>>),
+    must_contain(Out, <<"Без ответа: 0"/utf8>>),
+    ok.
+
+%% Полный JSON: все port_results включая skipped/error, open_ports, os с
+%% evidence без потерь и inspection_error как строка причины.
+discover_json_full(Config) ->
+    Result = #{ip => {127, 0, 0, 1}, state => up, method => tcp_open,
+               elapsed_ms => 12,
+               port_results =>
+                   [#{port => 22, state => open, elapsed_ms => 3},
+                    #{port => 445, state => closed, elapsed_ms => 2},
+                    #{port => 3389, state => skipped, elapsed_ms => 0,
+                      reason => budget_exhausted},
+                    #{port => 5985, state => error, elapsed_ms => 1,
+                      reason => timeout}],
+               open_ports => [22],
+               os => #{family => linux, confidence => low,
+                       evidence => [<<"tcp_open:22">>]},
+               inspection_error => {error, fixture_failure}},
+    Script = #{total => 1, status => ok, steps => [],
+               sync => {ok, [Result], summary(1, 1, #{up => 1})}},
+    {Driver, ScriptFile} = fake_driver(Config, Script),
+    {0, Out, Err} = run_split_env(
+                      Driver,
+                      ["discover", "--targets", "127.0.0.1", "--json",
+                       "--os", "--ports", "22,445,3389,5985"],
+                      fake_env(ScriptFile), Config),
+    <<>> = Err,
+    Map = json:decode(string:trim(Out)),
+    [Json] = maps:get(<<"results">>, Map),
+    <<"up">> = maps:get(<<"state">>, Json),
+    <<"tcp_open">> = maps:get(<<"method">>, Json),
+    Rows = maps:get(<<"port_results">>, Json),
+    [22, 445, 3389, 5985] = [maps:get(<<"port">>, R) || R <- Rows],
+    [<<"open">>, <<"closed">>, <<"skipped">>, <<"error">>] =
+        [maps:get(<<"state">>, R) || R <- Rows],
+    [<<"budget_exhausted">>, <<"timeout">>] =
+        [maps:get(<<"reason">>, R) || R <- Rows, maps:is_key(<<"reason">>, R)],
+    [22] = maps:get(<<"open_ports">>, Json),
+    Os = maps:get(<<"os">>, Json),
+    <<"linux">> = maps:get(<<"family">>, Os),
+    <<"low">> = maps:get(<<"confidence">>, Os),
+    [<<"tcp_open:22">>] = maps:get(<<"evidence">>, Os),
+    InspectionError = maps:get(<<"inspection_error">>, Json),
+    true = is_binary(InspectionError),
+    must_contain(InspectionError, <<"fixture_failure">>),
+    ok.
+
+%% --os без --ports: JSON не добавляет port_results/open_ports, но
+%% сохраняет полную структуру ОС.
+discover_json_os_only(Config) ->
+    Os = #{family => windows, confidence => medium,
+           evidence => [<<"ssh_banner:windows">>]},
+    Result = up_result_extra({127, 0, 0, 1}, tcp_open, #{os => Os}),
+    Script = #{total => 1, status => ok, steps => [],
+               sync => {ok, [Result], summary(1, 1, #{up => 1})}},
+    {Driver, ScriptFile} = fake_driver(Config, Script),
+    {0, Out, _Err} = run_split_env(
+                       Driver,
+                       ["discover", "--targets", "127.0.0.1", "--json",
+                        "--os"],
+                       fake_env(ScriptFile), Config),
+    Map = json:decode(string:trim(Out)),
+    [Json] = maps:get(<<"results">>, Map),
+    false = maps:is_key(<<"port_results">>, Json),
+    false = maps:is_key(<<"open_ports">>, Json),
+    JsonOs = maps:get(<<"os">>, Json),
+    <<"windows">> = maps:get(<<"family">>, JsonOs),
+    <<"medium">> = maps:get(<<"confidence">>, JsonOs),
+    [<<"ssh_banner:windows">>] = maps:get(<<"evidence">>, JsonOs),
     ok.
 
 %%% ------------------------------------------------------------------
@@ -674,6 +888,41 @@ executable() ->
 
 up_result(IP, Method) ->
     #{ip => IP, state => up, method => Method, elapsed_ms => 1}.
+
+up_result_extra(IP, Method, Extra) ->
+    maps:merge(up_result(IP, Method), Extra).
+
+%% Дополнительные поля «живого» результата: открытые выбранные порты и
+%% приблизительная ОС. Используются в потоковых, heartbeat- и PTY-тестах,
+%% чтобы новые столбцы проверялись вместе со старыми.
+live_extra(OpenPorts) ->
+    State = case lists:member(80, OpenPorts) of
+                true -> open;
+                false -> closed
+            end,
+    #{port_results => [#{port => 80, state => State, elapsed_ms => 1}],
+      open_ports => OpenPorts,
+      os => #{family => linux, confidence => low,
+              evidence => [<<"tcp_open:80">>]}}.
+
+%% Свободный локальный порт: слушатель открывается и сразу закрывается.
+closed_port() ->
+    {ok, Listen} = gen_tcp:listen(0, [binary, {ip, {127, 0, 0, 1}},
+                                      {active, false}]),
+    {ok, Port} = inet:port(Listen),
+    ok = gen_tcp:close(Listen),
+    Port.
+
+%% Строка находки в текстовом выводе (заголовок и сводка IP не содержат).
+finding_line(Out) ->
+    Lines = binary:split(Out, <<"\n">>, [global]),
+    case [Line || Line <- Lines,
+                  binary:match(Line, <<"127.0.0.1">>) =/= nomatch] of
+        [Line | _] ->
+            Line;
+        [] ->
+            ct:fail({finding_line_missing, Out})
+    end.
 
 noresp_result({A, B, C, D}) ->
     #{ip => {A, B, C, D}, state => no_response, elapsed_ms => 100}.

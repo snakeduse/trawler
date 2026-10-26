@@ -16,6 +16,15 @@
 %%% приходит до `DOWN', а падение воркера без результата синтезирует
 %%% `error' с причиной `worker_failed', поэтому адрес не теряется.
 %%%
+%%% После подтверждения `up' тот же воркер в том же слоте и с тем же
+%%% абсолютным сроком выполняет
+%%% {@link trawler_host_inspection:inspect/4}: явный набор портов и
+%%% необязательную классификацию ОС. Дополнительные ошибки не меняют
+%%% `up'; неожиданное исключение сохраняет `up' и добавляет
+%%% `inspection_error'. Сокет инспектора принадлежит воркеру, поэтому
+%%% отмена, deadline и остановка приложения закрывают его вместе с
+%%% процессом, а слот планировщика освобождается после `DOWN'.
+%%%
 %%% Координатор перехватывает выходы (`trap_exit') и следит за владельцем
 %%% и получателем. Отмена, deadline, выход владельца/получателя и
 %%% остановка приложения останавливают воркеры, снимают мониторы и
@@ -50,7 +59,9 @@
 
 %% Результат одного адреса. `method' присутствует у `up', `mac' — у ARP,
 %% `port' — у TCP, `rtt_ms' — у подтверждённой первой отправки, `reason'
-%% — у `error'.
+%% — у `error'. `port_results'/`open_ports' появляются при явном наборе,
+%% `os' — при классификации, `inspection_error' — при неожиданной ошибке
+%% инспектора без потери `up'.
 -type result_map() :: #{ip := ip4(),
                         state := result_state(),
                         elapsed_ms := non_neg_integer(),
@@ -58,7 +69,12 @@
                         mac => binary(),
                         port => 1..65535,
                         rtt_ms => non_neg_integer(),
-                        reason => term()}.
+                        reason => term(),
+                        port_results =>
+                            [trawler_host_inspection:port_result()],
+                        open_ports => [trawler_host_inspection:tcp_port()],
+                        os => trawler_host_inspection:os_map(),
+                        inspection_error => term()}.
 
 %% Снимок состояния обнаружения.
 -type status_map() :: #{state := state_name(),
@@ -82,7 +98,9 @@
                      deadline_ms := pos_integer() | infinity,
                      recipient := pid(),
                      caps := trawler_discovery_probe:caps(),
-                     ports => [1..65535]}.
+                     os_detection => boolean(),
+                     ports => [1..65535],
+                     probe_ports => [1..65535]}.
 
 -type state() :: #{status := state_name(),
                    total := non_neg_integer(),
@@ -98,6 +116,8 @@
                    caps := trawler_discovery_probe:caps(),
                    retries := 0..5,
                    ports := [1..65535] | undefined,
+                   probe_ports := [1..65535] | undefined,
+                   os_detection := boolean(),
                    timing := trawler_discovery_timing:state(),
                    start_time := integer(),
                    ref := reference(),
@@ -175,6 +195,8 @@ init(#{ref := Ref, addrs := Addrs, options := Options,
                caps => maps:get(caps, Options),
                retries => maps:get(retries, Options),
                ports => maps:get(ports, Options, undefined),
+               probe_ports => maps:get(probe_ports, Options, undefined),
+               os_detection => maps:get(os_detection, Options, false),
                timing => trawler_discovery_timing:initial(
                            maps:get(timeout_ms, Options)),
                start_time => erlang:monotonic_time(millisecond),
@@ -297,9 +319,10 @@ start_worker(State) ->
     Ref = maps:get(ref, State),
     Coordinator = self(),
     ProbeOpts = probe_options(State),
+    InspectionOpts = inspection_options(State),
     Budget = maps:get(timeout_ms, maps:get(options, State)),
     {Pid, Mon} = spawn_opt(fun() ->
-        worker(IP, Ref, Coordinator, ProbeOpts, Budget)
+        worker(IP, Ref, Coordinator, ProbeOpts, InspectionOpts, Budget)
     end, [link, monitor]),
     Monitors = maps:put(Mon, #{ip => IP, pid => Pid}, maps:get(monitors, State)),
     Status = case maps:get(status, State) of
@@ -332,22 +355,25 @@ can_take(State) ->
 %%% Воркер адреса
 %%% ------------------------------------------------------------------
 
-%% Воркер: маршрут и проба делят один общий бюджет адреса. Поиск маршрута
+%% Воркер: маршрут, проба и дополнительные проверки делят один
+%% абсолютный срок Deadline = Start + timeout_ms. Поиск маршрута
 %% ограничен остатком бюджета (route:lookup/2), поэтому даже медленный
 %% netlink не отодвигает пробу за пределы timeout_ms. Исчерпанный бюджет
 %% даёт no_response (не error): время адреса вышло без подтверждения.
-worker(IP, Ref, Coordinator, ProbeOpts, Budget) ->
+worker(IP, Ref, Coordinator, ProbeOpts, InspectionOpts, Budget) ->
     Start = erlang:monotonic_time(millisecond),
-    Result0 = worker_probe(IP, ProbeOpts, Budget, Start),
-    Result = Result0#{elapsed_ms => elapsed(Start)},
+    Deadline = Start + Budget,
+    Result0 = worker_probe(IP, ProbeOpts, Deadline),
+    Result1 = inspect_after_up(IP, Result0, InspectionOpts, Deadline),
+    Result = Result1#{elapsed_ms => elapsed(Start)},
     Coordinator ! {discovery_result, Ref, IP, Result}.
 
-worker_probe(IP, ProbeOpts, Budget, Start) ->
-    case remaining(Budget, Start) of
+worker_probe(IP, ProbeOpts, Deadline) ->
+    case remaining(Deadline) of
         Remaining when Remaining > 0 ->
             case trawler_discovery_route:lookup(IP, Remaining) of
                 {ok, Route} ->
-                    case remaining(Budget, Start) of
+                    case remaining(Deadline) of
                         Remaining2 when Remaining2 > 0 ->
                             trawler_discovery_probe:run(
                               IP, Route, ProbeOpts#{timeout_ms => Remaining2});
@@ -355,7 +381,7 @@ worker_probe(IP, ProbeOpts, Budget, Start) ->
                             no_response_result(IP)
                     end;
                 {error, Reason} ->
-                    case remaining(Budget, Start) of
+                    case remaining(Deadline) of
                         Left when Left > 0 ->
                             #{ip => IP, state => error, elapsed_ms => 0,
                               reason => Reason};
@@ -367,8 +393,58 @@ worker_probe(IP, ProbeOpts, Budget, Start) ->
             no_response_result(IP)
     end.
 
-remaining(Budget, Start) ->
-    Budget - (erlang:monotonic_time(millisecond) - Start).
+%% Дополнительные проверки выполняются только для подтверждённого адреса,
+%% в том же процессе и с тем же абсолютным сроком. Пустой набор опций
+%% возвращает пустую карту без сети.
+inspect_after_up(_IP, #{state := State} = Result, _InspectionOpts, _Deadline)
+  when State =/= up ->
+    Result;
+inspect_after_up(IP, Result, #{ports := Ports, os_detection := OSDetection},
+                 Deadline) ->
+    case safe_inspect(IP, Ports, OSDetection, Deadline) of
+        {ok, Extra} ->
+            maps:merge(Result, Extra);
+        {error, Cause} ->
+            %% Неожиданная ошибка инспектора не скрывает найденный хост:
+            %% up сохраняется, явные порты получают skipped, ОС unknown.
+            Extra = fallback_inspection(IP, Ports, OSDetection),
+            maps:merge(Result, Extra#{inspection_error => Cause})
+    end.
+
+safe_inspect(IP, Ports, OSDetection, Deadline) ->
+    try
+        {ok, trawler_host_inspection:inspect(IP, Ports, OSDetection, Deadline)}
+    catch
+        Class:Reason ->
+            {error, {Class, Reason}}
+    end.
+
+%% Запасные наблюдения строятся самостоятельно, без повторного вызова
+%% инспектора: если модуль падает постоянно, второй вызов снова бросил
+%% бы исключение и потерял обязательные запрошенные поля. Сокеты не
+%% открываются, формы дополнительных полей сохраняются: явные порты
+%% получают `skipped', запрошенная ОС — `unknown/none'.
+fallback_inspection(_IP, undefined, false) ->
+    #{};
+fallback_inspection(_IP, undefined, true) ->
+    #{os => unknown_os()};
+fallback_inspection(_IP, Ports, OSDetection) when is_list(Ports) ->
+    Base = #{port_results => skipped_rows(Ports), open_ports => []},
+    case OSDetection of
+        true -> Base#{os => unknown_os()};
+        false -> Base
+    end.
+
+skipped_rows(Ports) ->
+    [#{port => Port, state => skipped, elapsed_ms => 0,
+       reason => inspection_error}
+     || Port <- lists:sort(Ports)].
+
+unknown_os() ->
+    #{family => unknown, confidence => none, evidence => []}.
+
+remaining(Deadline) ->
+    Deadline - erlang:monotonic_time(millisecond).
 
 elapsed(Start) ->
     max(0, erlang:monotonic_time(millisecond) - Start).
@@ -630,17 +706,25 @@ concurrency(State) ->
     maps:get(concurrency, maps:get(options, State)).
 
 %% Опции пробы одного адреса: caps передаётся, чтобы не пересчитывать
-%% capabilities/0 на каждый адрес; ports включается только для tcp/auto;
-%% timing переносит оценку RTT между адресами, не сокращая жёсткий бюджет.
+%% capabilities/0 на каждый адрес; probe_ports включается только для
+%% tcp/auto. Публичный явный набор `ports' в транспорт не передаётся:
+%% для arp/icmp/raw_tcp его там быть не должно, а инспектор получает его
+%% отдельно. Timing переносит оценку RTT между адресами, не сокращая
+%% жёсткий бюджет.
 probe_options(State) ->
     Base = #{method => maps:get(method, State),
              caps => maps:get(caps, State),
              retries => maps:get(retries, State),
              timing => maps:get(timing, State)},
-    case maps:get(ports, State) of
+    case maps:get(probe_ports, State) of
         undefined -> Base;
         Ports -> Base#{ports => Ports}
     end.
+
+%% Полные явные порты и флаг классификации для того же воркера.
+inspection_options(State) ->
+    #{ports => maps:get(ports, State),
+      os_detection => maps:get(os_detection, State)}.
 
 status_map(State) ->
     #{state => maps:get(status, State),

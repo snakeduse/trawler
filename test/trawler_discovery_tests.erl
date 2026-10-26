@@ -13,6 +13,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(LO, <<"127.0.0.1">>).
+-define(LO_IP, {127, 0, 0, 1}).
 
 discovery_test_() ->
     {setup, fun setup/0, fun cleanup/1,
@@ -30,7 +31,22 @@ discovery_test_() ->
           ?_test(recipient_down()),
           ?_test(owner_down()),
           ?_test(app_stop_cleanup()),
-          ?_test(ports_only_tcp()),
+          ?_test(default_request_no_extra_fields()),
+          ?_test(auto_ports_closed_up_no_filter()),
+          ?_test(explicit_many_ports_accepted()),
+          ?_test(inspection_sync_async_equivalent()),
+          ?_test(inspection_elapsed_includes_banner_read()),
+          ?_test(os_only_without_explicit_ports()),
+          ?_test(budget_exhausted_up_preserved()),
+          ?_test(no_response_skips_inspector()),
+          ?_test(error_skips_inspector()),
+          ?_test(inspection_exception_keeps_requested_fields()),
+          ?_test(ports_validation_all_methods()),
+          ?_test(cancel_during_banner_read()),
+          ?_test(deadline_during_banner_read()),
+          ?_test(owner_down_during_banner_read()),
+          ?_test(recipient_down_during_banner_read()),
+          ?_test(app_stop_during_banner_read()),
           ?_test(cancel_status_kept_after_recipient_exit()),
           ?_test(cancel_status_kept_after_owner_exit()),
           ?_test(stale_worker_exit_ignored()),
@@ -69,14 +85,18 @@ validation_no_network() ->
                  trawler:discover(?LO, #{timeout_ms => 0})),
     ?assertEqual({error, {invalid_options, {deadline_ms, 0}}},
                  trawler:discover(?LO, #{deadline_ms => 0})),
-    ?assertEqual({error, {invalid_options, ports}},
-                 trawler:discover(?LO, #{method => arp, ports => [80]})),
-    ?assertEqual({error, {invalid_options, {too_many_ports, 17}}},
-                 trawler:discover(?LO, #{method => tcp,
-                                         ports => lists:seq(1, 17)})),
+    ?assertEqual({error, {invalid_options, {os_detection, 1}}},
+                 trawler:discover(?LO, #{os_detection => 1})),
+    ?assertEqual({error, {invalid_options, {os_detection, <<"true">>}}},
+                 trawler:discover(?LO, #{os_detection => <<"true">>})),
     ?assertMatch({error, {invalid_targets, _}}, trawler:discover(<<>>, #{})),
     ?assertMatch({error, {invalid_ports, _}},
                  trawler:discover(?LO, #{method => tcp, ports => <<"0">>})),
+    ?assertMatch({error, {invalid_ports, _}},
+                 trawler:discover(?LO, #{method => auto, ports => [0]})),
+    ?assertMatch({error, {invalid_ports, _}},
+                 trawler:discover(?LO, #{method => arp,
+                                         ports => [65536]})),
     %% Ни одного сокета и ни одного разрешения планировщика.
     ?assertEqual(PortsBefore, length(erlang:ports())),
     ?assertEqual(0, in_flight()).
@@ -285,22 +305,355 @@ app_stop_cleanup() ->
 %%% Регрессии портов, жизненного цикла и бюджета адреса
 %%% ------------------------------------------------------------------
 
-%% Порты допустимы только для явного TCP connect. `auto' с ключом ports
-%% отклоняется, чтобы намерение не терялось; атом default передаётся
-%% существующему parser'у и отклоняется как too_many_ports (1000), а не
-%% молча подменяется набором 80/443.
-ports_only_tcp() ->
-    ?assertEqual({error, {invalid_options, ports}},
-                 trawler:discover(?LO, #{ports => [80]})),
-    ?assertEqual({error, {invalid_options, ports}},
-                 trawler:discover(?LO, #{method => auto, ports => [80]})),
-    ?assertEqual({error, {invalid_options, ports}},
-                 trawler:discover(?LO, #{method => icmp, ports => [80]})),
-    ?assertEqual({error, {invalid_options, {too_many_ports, 1000}}},
-                 trawler:discover(?LO, #{method => tcp, ports => default})),
-    %% Валидный tcp остаётся валидным.
-    ?assertMatch({error, _},
-                 trawler:discover(?LO, #{method => tcp, ports => <<"0">>})).
+%% Порты проверяются до сети при любом методе; сами номера остаются
+%% строгими, а прежний запрет 16 значений снят.
+ports_validation_all_methods() ->
+    lists:foreach(
+      fun(Method) ->
+              ?assertMatch({error, {invalid_ports, _}},
+                           trawler:discover(?LO, #{method => Method,
+                                                   ports => [0]}))
+      end, [auto, arp, icmp, tcp, raw_tcp]),
+    ?assertEqual({error, {invalid_options, {unknown_option, foo}}},
+                 trawler:discover(?LO, #{foo => 1})).
+
+%% Прежний запрос без ports/os_detection не получает дополнительных
+%% полей. Транспорт при этом по-прежнему получает набор 80/443, а
+%% инспектор вызывается с undefined/false и возвращает пустую карту.
+default_request_no_extra_fields() ->
+    Calls = with_traces([{trawler_discovery_probe, run, 3},
+                         {trawler_host_inspection, inspect, 4}],
+                        fun() ->
+                                {ok, [Result], _Summary} =
+                                    trawler:discover(?LO, #{method => tcp,
+                                                           retries => 0}),
+                                ?assertEqual(up, maps:get(state, Result)),
+                                ?assertNot(maps:is_key(port_results, Result)),
+                                ?assertNot(maps:is_key(open_ports, Result)),
+                                ?assertNot(maps:is_key(os, Result)),
+                                ?assertNot(maps:is_key(inspection_error, Result))
+                        end, 300),
+    [ProbeArgs] = [Args || {trawler_discovery_probe, run, Args} <- Calls],
+    ProbeOpts = lists:nth(3, ProbeArgs),
+    ?assertEqual([80, 443], maps:get(ports, ProbeOpts)),
+    ?assertNot(maps:is_key(os_detection, ProbeOpts)),
+    [InspectArgs] = [Args || {trawler_host_inspection, inspect, Args} <- Calls],
+    ?assertMatch([_IP, undefined, false, _Deadline], InspectArgs).
+
+%% auto на loopback подтверждается как local; явные закрытые порты не
+%% фильтруют находку и не попадают в публичные ports транспорта вместе с
+%% os_detection.
+auto_ports_closed_up_no_filter() ->
+    Closed = closed_port(),
+    Calls = with_traces([{trawler_discovery_probe, run, 3},
+                         {trawler_host_inspection, inspect, 4}],
+                        fun() ->
+                                {ok, [Result], _Summary} =
+                                    trawler:discover(?LO,
+                                                     #{method => auto,
+                                                       ports => [Closed],
+                                                       retries => 0}),
+                                ?assertEqual(up, maps:get(state, Result)),
+                                ?assertEqual(local, maps:get(method, Result)),
+                                #{port_results := Rows, open_ports := []} =
+                                    Result,
+                                ?assertEqual([Closed],
+                                             [maps:get(port, Row)
+                                              || Row <- Rows]),
+                                ?assertEqual(closed,
+                                             maps:get(state, hd(Rows))),
+                                ?assert(maps:get(elapsed_ms, hd(Rows)) >= 0)
+                        end, 300),
+    [ProbeArgs] = [Args || {trawler_discovery_probe, run, Args} <- Calls],
+    ProbeOpts = lists:nth(3, ProbeArgs),
+    ?assertEqual([Closed], maps:get(ports, ProbeOpts)),
+    ?assertNot(maps:is_key(os_detection, ProbeOpts)),
+    [InspectArgs] = [Args || {trawler_host_inspection, inspect, Args} <- Calls],
+    ?assertMatch([_IP, [Closed], false, _Deadline], InspectArgs).
+
+%% Более 16 явных портов принимается без подмены и проверяется линейно.
+explicit_many_ports_accepted() ->
+    Ports = closed_ports(17),
+    {ok, [Result], _Summary} =
+        trawler:discover(?LO, #{method => tcp, ports => Ports, retries => 0,
+                               timeout_ms => 3000}),
+    ?assertEqual(up, maps:get(state, Result)),
+    Rows = maps:get(port_results, Result),
+    ?assertEqual(lists:sort(Ports), [maps:get(port, Row) || Row <- Rows]),
+    ?assert(lists:all(fun(Row) -> maps:get(state, Row) =:= closed end,
+                      Rows)),
+    ?assertEqual([], maps:get(open_ports, Result)).
+
+%% Синхронный и асинхронный API отдают одинаковые дополнительные данные
+%% без учёта длительностей.
+inspection_sync_async_equivalent() ->
+    {BannerPid, Open} = banner_server(),
+    Closed = closed_port(),
+    Opts = #{method => tcp, ports => [Open, Closed], os_detection => true,
+             retries => 0, timeout_ms => 3000},
+    try
+        {ok, [Sync], _SyncSummary} = trawler:discover(?LO, Opts),
+        {ok, Ref} = trawler:start_discovery(?LO, Opts#{recipient => self()}),
+        {[Async], _AsyncSummary} = receive_until_done(Ref, 5000, []),
+        ?assertEqual(up, maps:get(state, Sync)),
+        ?assertEqual(up, maps:get(state, Async)),
+        ?assertEqual(strip_elapsed(maps:get(port_results, Sync)),
+                     strip_elapsed(maps:get(port_results, Async))),
+        ?assertEqual(maps:get(open_ports, Sync),
+                     maps:get(open_ports, Async)),
+        ?assertEqual(maps:get(os, Sync), maps:get(os, Async))
+    after
+        exit(BannerPid, kill)
+    end.
+
+%% Совокупный elapsed_ms адреса включает чтение молчащих баннеров
+%% дополнительных проверок, а не только обнаружение.
+inspection_elapsed_includes_banner_read() ->
+    Fixtures = banner_fixtures(2),
+    Ports = fixture_ports(Fixtures),
+    try
+        {ok, [Result], _Summary} =
+            trawler:discover(?LO, #{method => auto, ports => Ports,
+                                   os_detection => true,
+                                   timeout_ms => 3000, retries => 0}),
+        ?assertEqual(up, maps:get(state, Result)),
+        ?assertEqual(local, maps:get(method, Result)),
+        ?assertEqual(lists:sort(Ports),
+                     [maps:get(port, Row)
+                      || Row <- maps:get(port_results, Result)]),
+        ?assert(lists:all(fun(#{state := State}) -> State =:= open end,
+                          maps:get(port_results, Result))),
+        %% Две попытки по 200 мс; порог ниже суммы, чтобы не зависеть от
+        %% планировщика, но заметно больше мгновенного обнаружения.
+        ?assert(maps:get(elapsed_ms, Result) >= 300)
+    after
+        stop_fixtures(Fixtures)
+    end.
+
+%% Классификация без явных портов добавляет только os и не публикует
+%% служебный набор как port_results/open_ports.
+os_only_without_explicit_ports() ->
+    {ok, [Result], _Summary} =
+        trawler:discover(?LO, #{method => auto, os_detection => true,
+                               timeout_ms => 1000, retries => 0}),
+    ?assertEqual(up, maps:get(state, Result)),
+    ?assertEqual(local, maps:get(method, Result)),
+    ?assertNot(maps:is_key(port_results, Result)),
+    ?assertNot(maps:is_key(open_ports, Result)),
+    Os = maps:get(os, Result),
+    ?assert(lists:member(maps:get(family, Os), [windows, linux, unknown])),
+    ?assert(lists:member(maps:get(confidence, Os), [medium, low, none])),
+    ?assert(is_list(maps:get(evidence, Os))).
+
+%% Исчерпанный бюджет не отменяет подтверждение up: часть явных портов
+%% возвращается skipped, а не закрывается или теряется.
+budget_exhausted_up_preserved() ->
+    Ports = lists:seq(1, 65535),
+    Start = now_ms(),
+    {ok, [Result], _Summary} =
+        trawler:discover(?LO, #{method => auto, ports => Ports,
+                               timeout_ms => 100, retries => 0}),
+    Wall = now_ms() - Start,
+    ?assertEqual(up, maps:get(state, Result)),
+    ?assertEqual(local, maps:get(method, Result)),
+    Rows = maps:get(port_results, Result),
+    ?assertEqual(65535, length(Rows)),
+    ?assertEqual(Ports, [maps:get(port, Row) || Row <- Rows]),
+    ?assert(lists:any(fun(Row) -> maps:get(state, Row) =:= skipped end, Rows)),
+    ?assert(lists:all(fun(Row) ->
+                              lists:member(maps:get(state, Row),
+                                           [open, closed, timeout, unreachable,
+                                            error, skipped])
+                      end, Rows)),
+    ?assert(Wall < 2000).
+
+%% no_response не запускает инспектор: трассировка реального вызова
+%% inspect/4 пуста.
+no_response_skips_inspector() ->
+    {Listen, Holder, Port} = slow_target(),
+    try
+        Calls = with_traces([{trawler_host_inspection, inspect, 4}],
+                            fun() ->
+                                    {ok, [Result], _Summary} =
+                                        trawler:discover(
+                                          ?LO, #{method => tcp, ports => [Port],
+                                                 os_detection => true,
+                                                 timeout_ms => 200,
+                                                 retries => 0}),
+                                    ?assertEqual(no_response,
+                                                 maps:get(state, Result))
+                            end, 200),
+        ?assertEqual([], Calls)
+    after
+        gen_tcp:close(Listen),
+        gen_tcp:close(Holder)
+    end.
+
+%% Ошибка пробы также не запускает инспектор и не превращается в up.
+%% Сценарий ограничен loopback: координатор запускается напрямую с
+%% методом arp, а маршрут 127.0.0.1 не является Ethernet, поэтому проба
+%% детерминированно даёт method_not_applicable ещё до raw-сокета. Ни
+%% внешний адрес, ни сетевые привилегии, ни подмена ядра не нужны.
+error_skips_inspector() ->
+    Calls = with_traces([{trawler_host_inspection, inspect, 4}],
+                        fun() ->
+                                {Ref, _Pid} = start_direct_coordinator(
+                                                loopback_error_options()),
+                                {Results, Summary} =
+                                    receive_until_done(Ref, 5000, []),
+                                ?assertMatch(
+                                   [#{state := error,
+                                      reason := {method_not_applicable,
+                                                 not_ethernet}}],
+                                   Results),
+                                [Result] = Results,
+                                ?assertEqual(?LO_IP, maps:get(ip, Result)),
+                                ?assertNot(maps:is_key(port_results, Result)),
+                                ?assertNot(maps:is_key(open_ports, Result)),
+                                ?assertNot(maps:is_key(os, Result)),
+                                ?assertNot(maps:is_key(inspection_error, Result)),
+                                ?assertMatch(#{total := 1, completed := 1},
+                                             Summary),
+                                ?assertMatch(#{error := 1},
+                                             maps:get(counters, Summary))
+                        end, 200),
+    ?assertEqual([], Calls).
+
+%% Постоянное исключение инспектора не должно терять обязательные
+%% запрошенные поля: fallback строит наблюдения сам, без повторного
+%% вызова сломанного модуля. Подмена модуля выполняется в изолированной
+%% Erlang VM (compile:forms + code:load_abs в отдельном процессе `erl'),
+%% поэтому production-кода и общих переключателей это не касается.
+inspection_exception_keeps_requested_fields() ->
+    Dir = fixture_dir("inspection_exception"),
+    try
+        ok = filelib:ensure_dir(filename:join(Dir, "keep")),
+        {ok, trawler_host_inspection, Binary} =
+            compile:forms(stub_inspector_forms(), [binary, return_errors]),
+        BeamName = filename:join(Dir, "trawler_host_inspection"),
+        ok = file:write_file(BeamName ++ ".beam", Binary),
+        Output = run_isolated_discovery(Dir),
+        {ok, [#{state := up} = Result], _Summary} = Output,
+        ?assertEqual(local, maps:get(method, Result)),
+        Ports = [22, 445],
+        ?assertEqual(
+           [#{port => 22, state => skipped, elapsed_ms => 0,
+              reason => inspection_error},
+            #{port => 445, state => skipped, elapsed_ms => 0,
+              reason => inspection_error}],
+           maps:get(port_results, Result)),
+        ?assertEqual([], maps:get(open_ports, Result)),
+        ?assertMatch(#{family := unknown, confidence := none, evidence := []},
+                     maps:get(os, Result)),
+        ?assertMatch({error, fixture_failure},
+                     maps:get(inspection_error, Result)),
+        ?assertEqual(Ports, [maps:get(port, Row)
+                             || Row <- maps:get(port_results, Result)])
+    after
+        _ = file:del_dir_r(Dir)
+    end.
+
+%% Отмена во время чтения молчащего баннера: слот удерживается до
+%% инспекции, а после отмены воркер и сокет прекращены до terminal event.
+cancel_during_banner_read() ->
+    Fixtures = banner_fixtures(3),
+    try
+        Ports = fixture_ports(Fixtures),
+        {ok, Ref} = start_banner_discovery(Ports, #{}),
+        Worker = await_worker(coordinator(Ref), 2000),
+        Accepted = await_banner_accept(Ports),
+        ?assertEqual(1, in_flight()),
+        ?assertEqual(ok, trawler:cancel_discovery(Ref)),
+        ?assertNot(is_process_alive(Worker)),
+        ?assertEqual(0, in_flight()),
+        await_banner_closed(Accepted),
+        Summary = receive_cancelled(Ref, 5000),
+        ?assertEqual(0, maps:get(completed, Summary)),
+        ensure_no_more(Ref, 200)
+    after
+        stop_fixtures(Fixtures)
+    end.
+
+%% Deadline во время чтения баннера освобождает слот до терминального
+%% события; результат адреса не учитывается как завершённый.
+deadline_during_banner_read() ->
+    Fixtures = banner_fixtures(3),
+    try
+        Ports = fixture_ports(Fixtures),
+        {ok, Ref} = start_banner_discovery(Ports, #{deadline_ms => 500}),
+        Worker = await_worker(coordinator(Ref), 2000),
+        Accepted = await_banner_accept(Ports),
+        ?assertEqual(0, await_in_flight(0, 3000)),
+        ?assertNot(is_process_alive(Worker)),
+        await_banner_closed(Accepted),
+        Summary = receive_error(Ref, deadline_exceeded, 5000),
+        ?assertEqual(0, maps:get(completed, Summary))
+    after
+        stop_fixtures(Fixtures)
+    end.
+
+%% Выход владельца останавливает воркер, читающий баннер.
+owner_down_during_banner_read() ->
+    Fixtures = banner_fixtures(3),
+    Ports = fixture_ports(Fixtures),
+    Test = self(),
+    Owner = spawn(fun() ->
+                          {ok, Ref} = start_banner_discovery(
+                                        Ports, #{recipient => Test}),
+                          Test ! {banner_ref, Ref},
+                          receive stop -> ok end
+                  end),
+    try
+        Ref = receive {banner_ref, R} -> R after 3000 -> error(no_ref) end,
+        Worker = await_worker(coordinator(Ref), 2000),
+        Accepted = await_banner_accept(Ports),
+        exit(Owner, kill),
+        ok = wait_not_found(Ref, 3000),
+        ?assertNot(is_process_alive(Worker)),
+        ?assertEqual(0, await_in_flight(0, 2000)),
+        await_banner_closed(Accepted)
+    after
+        exit(Owner, kill),
+        stop_fixtures(Fixtures)
+    end.
+
+%% Выход получателя останавливает воркер, читающий баннер.
+recipient_down_during_banner_read() ->
+    Fixtures = banner_fixtures(3),
+    try
+        Ports = fixture_ports(Fixtures),
+        Recipient = spawn(fun() -> receive stop -> ok end end),
+        {ok, Ref} = start_banner_discovery(Ports, #{recipient => Recipient}),
+        Worker = await_worker(coordinator(Ref), 2000),
+        Accepted = await_banner_accept(Ports),
+        exit(Recipient, kill),
+        ok = wait_not_found(Ref, 3000),
+        ?assertNot(is_process_alive(Worker)),
+        ?assertEqual(0, await_in_flight(0, 2000)),
+        await_banner_closed(Accepted)
+    after
+        stop_fixtures(Fixtures)
+    end.
+
+%% Остановка приложения во время чтения баннера убивает координатор и
+%% воркер, а сокет закрывается.
+app_stop_during_banner_read() ->
+    Fixtures = banner_fixtures(3),
+    try
+        Ports = fixture_ports(Fixtures),
+        {ok, Ref} = start_banner_discovery(Ports, #{}),
+        Coord = coordinator(Ref),
+        Worker = await_worker(Coord, 2000),
+        Accepted = await_banner_accept(Ports),
+        ok = application:stop(trawler),
+        ?assertEqual(undefined, whereis(trawler_sup)),
+        ?assertNot(is_process_alive(Coord)),
+        ?assertNot(is_process_alive(Worker)),
+        await_banner_closed(Accepted)
+    after
+        stop_fixtures(Fixtures),
+        {ok, _} = application:ensure_all_started(trawler)
+    end.
 
 %% После отмены сохранённый статус не теряется при выходе получателя в
 %% течение обещанного срока хранения (60 с): мониторы жизненного цикла
@@ -663,6 +1016,245 @@ receive_done(Ref, Timeout) ->
         {trawler_discovery, Ref, {done, Summary}} -> Summary
     after Timeout ->
         error(no_done_event)
+    end.
+
+%% Несколько закрытых локальных портов: слушатели создаются заранее,
+%% поэтому номера уникальны, и сразу закрываются.
+closed_ports(N) ->
+    Listeners = [begin
+                     {ok, Listen} = gen_tcp:listen(
+                                      0, [inet, {ip, ?LO_IP},
+                                          {active, false}]),
+                     {ok, Port} = inet:port(Listen),
+                     {Listen, Port}
+                 end || _ <- lists:seq(1, N)],
+    [begin
+         ok = gen_tcp:close(Listen),
+         Port
+     end || {Listen, Port} <- Listeners].
+
+%% Дополнительные данные без длительностей: sync и async могут
+%% различаться только elapsed_ms.
+strip_elapsed(Rows) ->
+    [maps:remove(elapsed_ms, Row) || Row <- Rows].
+
+%% Слушатель с корректным Ubuntu SSH-баннером на каждое соединение:
+%% классификация не зависит от реального sshd на loopback.
+banner_server() ->
+    {ok, Listen} = gen_tcp:listen(
+                     0, [inet, {ip, ?LO_IP}, {active, false},
+                         {reuseaddr, true}]),
+    {ok, Port} = inet:port(Listen),
+    Pid = spawn(fun() -> banner_accept_loop(Listen) end),
+    {Pid, Port}.
+
+banner_accept_loop(Listen) ->
+    case gen_tcp:accept(Listen) of
+        {ok, Socket} ->
+            _ = gen_tcp:send(Socket,
+                             <<"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1\r\n">>),
+            _ = gen_tcp:close(Socket),
+            banner_accept_loop(Listen);
+        {error, _Reason} ->
+            _ = gen_tcp:close(Listen),
+            ok
+    end.
+
+%% Трассировка вызовов заданных MFA во всех процессах. Сообщения dbg
+%% складываются в ящик теста и разбираются после завершения сценария.
+with_traces(MFAs, Fun, Timeout) ->
+    Self = self(),
+    _ = dbg:tracer(process,
+                   {fun(Msg, Acc) -> Acc ! {trace_msg, Msg}, Acc end, Self}),
+    try
+        _ = [dbg:tpl(M, F, A, []) || {M, F, A} <- MFAs],
+        _ = dbg:p(all, [call]),
+        _ = Fun(),
+        collect_traces(Timeout, [])
+    after
+        _ = [dbg:ctpl(M, F, A) || {M, F, A} <- MFAs],
+        _ = dbg:stop()
+    end.
+
+collect_traces(Timeout, Acc) ->
+    receive
+        {trace_msg, {trace, _Pid, call, {M, F, Args}}} ->
+            collect_traces(Timeout, [{M, F, Args} | Acc]);
+        {trace_msg, _Other} ->
+            collect_traces(Timeout, Acc)
+    after Timeout ->
+        lists:reverse(Acc)
+    end.
+
+%% Прямой запуск координатора под штатным supervisor: детерминированная
+%% ошибка пробы проверяется на loopback без внешних адресов и без
+%% production-переключателей.
+start_direct_coordinator(Options) ->
+    Ref = make_ref(),
+    Args = #{ref => Ref,
+             addrs => [?LO_IP],
+             options => Options,
+             warnings => [],
+             owner => self()},
+    ChildSpec = #{id => Ref,
+                  start => {trawler_discovery_scan, start_link, [Args]},
+                  restart => temporary,
+                  shutdown => 5000,
+                  type => worker,
+                  modules => [trawler_discovery_scan]},
+    {ok, Pid} = supervisor:start_child(trawler_discovery_sup, ChildSpec),
+    {Ref, Pid}.
+
+%% Нормализованные внутренние опции координатора: ARP объявлен
+%% доступным, но loopback не Ethernet, поэтому проба завершается
+%% method_not_applicable до открытия raw-сокета.
+loopback_error_options() ->
+    #{method => arp,
+      timeout_ms => 500,
+      concurrency => 1,
+      retries => 0,
+      deadline_ms => infinity,
+      recipient => self(),
+      caps => #{arp => true, icmp => false, raw_tcp => false,
+                reason => undefined},
+      ports => [80],
+      os_detection => true}.
+
+%% Каталог fixture-модуля в _build: не попадает в отслеживаемые файлы.
+fixture_dir(Name) ->
+    BuildRoot = filename:dirname(filename:dirname(code:lib_dir(trawler))),
+    Unique = integer_to_list(erlang:unique_integer([positive, monotonic])),
+    filename:join([BuildRoot, "trawler_test_fixtures", Name, Unique]).
+
+%% Заглушка инспектора, которая всегда завершается исключением. Модуль
+%% компилируется из форм и загружается только в отдельной VM.
+stub_inspector_forms() ->
+    Sources = ["-module(trawler_host_inspection).",
+               "-export([inspect/4, classify/1]).",
+               "inspect(_IP, _RequestedPorts, _OSDetection, _Deadline) ->"
+               "    error(fixture_failure).",
+               "classify(_Observations) ->"
+               "    #{family => unknown, confidence => none, evidence => []}."],
+    [scan_form(Source) || Source <- Sources].
+
+scan_form(Source) ->
+    {ok, Tokens, _EndLine} = erl_scan:string(Source),
+    {ok, Form} = erl_parse:parse_form(Tokens),
+    Form.
+
+%% Отдельная Erlang VM: реальное приложение, подменённый модуль и
+%% публичный API. Результат возвращается одной строкой `RESULT'.
+run_isolated_discovery(Dir) ->
+    Erl = case os:find_executable("erl") of
+              false -> error(erl_executable_not_found);
+              Path -> Path
+          end,
+    Ebin = filename:join(code:lib_dir(trawler), "ebin"),
+    Eval = isolated_eval(filename:join(Dir, "trawler_host_inspection")),
+    Port = open_port(
+             {spawn_executable, Erl},
+             [binary, exit_status, use_stdio, stderr_to_stdout,
+              {args, ["-noshell", "-pa", Ebin, "-pa", Dir, "-eval", Eval]}]),
+    parse_isolated_output(collect_isolated(Port, <<>>, 15000)).
+
+isolated_eval(BeamAbs) ->
+    Quoted = lists:flatten(io_lib:format("\"~ts\"", [BeamAbs])),
+    lists:flatten(
+      ["{ok, _} = application:ensure_all_started(trawler), ",
+       "_ = code:purge(trawler_host_inspection), ",
+       "_ = code:delete(trawler_host_inspection), ",
+       "{module, trawler_host_inspection} = code:load_abs(", Quoted, "), ",
+       "R = trawler:discover(<<\"127.0.0.1\">>, ",
+       "#{method => auto, ports => [22,445], os_detection => true, ",
+       "timeout_ms => 500, retries => 0}), ",
+       "io:format(\"RESULT ~w~n\", [R]), erlang:halt(0)."]).
+
+collect_isolated(Port, Acc, Timeout) ->
+    receive
+        {Port, {data, Data}} ->
+            collect_isolated(Port, <<Acc/binary, Data/binary>>, Timeout);
+        {Port, {exit_status, 0}} ->
+            Acc;
+        {Port, {exit_status, Status}} ->
+            error({isolated_vm_failed, Status, Acc})
+    after Timeout ->
+        port_close(Port),
+        error(isolated_vm_timeout)
+    end.
+
+parse_isolated_output(Output) ->
+    Lines = binary:split(Output, <<"\n">>, [global]),
+    case [Rest || <<"RESULT ", Rest/binary>> <- Lines] of
+        [TermText | _] ->
+            {ok, Tokens, _EndLine} =
+                erl_scan:string(binary_to_list(TermText) ++ "."),
+            {ok, Term} = erl_parse:parse_term(Tokens),
+            Term;
+        [] ->
+            error({isolated_result_missing, Output})
+    end.
+
+%% Слушатель, который принимает одно соединение и молчит: воркер
+%% остаётся в чтении баннера до отмены/deadline/выхода. Событие accept
+%% подтверждает, что явный ephemeral-порт проверяется первым.
+banner_fixtures(N) ->
+    [banner_fixture() || _ <- lists:seq(1, N)].
+
+banner_fixture() ->
+    {ok, Listen} = gen_tcp:listen(
+                     0, [inet, {ip, ?LO_IP}, {active, false},
+                         {reuseaddr, true}]),
+    {ok, Port} = inet:port(Listen),
+    Test = self(),
+    Pid = spawn(fun() -> banner_fixture_loop(Listen, Port, Test) end),
+    {Pid, Port}.
+
+banner_fixture_loop(Listen, Port, Test) ->
+    case gen_tcp:accept(Listen, 5000) of
+        {ok, Socket} ->
+            _ = gen_tcp:close(Listen),
+            Test ! {banner_accepted, Port},
+            Result = gen_tcp:recv(Socket, 0, 5000),
+            Test ! {banner_closed, Port, Result},
+            _ = gen_tcp:close(Socket),
+            ok;
+        {error, _Reason} ->
+            _ = gen_tcp:close(Listen),
+            ok
+    end.
+
+fixture_ports(Fixtures) ->
+    [Port || {_Pid, Port} <- Fixtures].
+
+stop_fixtures(Fixtures) ->
+    _ = [exit(Pid, kill) || {Pid, _Port} <- Fixtures],
+    ok.
+
+start_banner_discovery(Ports, Extra) ->
+    Base = #{method => auto, ports => Ports, os_detection => true,
+             timeout_ms => 5000, retries => 0, concurrency => 1,
+             recipient => self()},
+    trawler:start_discovery(?LO, maps:merge(Base, Extra)).
+
+await_banner_accept(Ports) ->
+    receive
+        {banner_accepted, Port} ->
+            case lists:member(Port, Ports) of
+                true -> Port;
+                false -> await_banner_accept(Ports)
+            end
+    after 3000 ->
+        error(no_banner_accept)
+    end.
+
+await_banner_closed(Port) ->
+    receive
+        {banner_closed, Port, {error, closed}} ->
+            ok;
+        {banner_closed, Port, Other} ->
+            error({unexpected_banner_close, Other})
+    after 3000 ->
+        error(no_banner_close)
     end.
 
 now_ms() ->
